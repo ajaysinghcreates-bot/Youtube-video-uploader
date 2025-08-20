@@ -1,0 +1,280 @@
+name: Instagram Reels to YouTube Shorts
+
+on:
+  schedule:
+    # Run daily at 9 AM UTC
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      instagram_url:
+        description: 'Instagram Reel URL (optional - for manual trigger)'
+        required: false
+        type: string
+
+env:
+  YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+  YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+  YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+jobs:
+  process-reels:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install yt-dlp google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client openai requests beautifulsoup4
+
+    - name: Download Instagram Reel
+      id: download
+      run: |
+        python - <<EOF
+        import yt_dlp
+        import json
+        import os
+        import sys
+        import re
+        from urllib.parse import urlparse
+
+        def sanitize_filename(filename):
+            # Remove invalid characters for filenames
+            return re.sub(r'[<>:"/\\|?*]', '', filename)[:100]
+
+        def download_reel(url):
+            ydl_opts = {
+                'format': 'best[height<=1080]',
+                'outtmpl': 'downloads/%(title)s.%(ext)s',
+                'writeinfojson': True,
+                'writesubtitles': True,
+                'writeautomaticsub': True,
+            }
+            
+            os.makedirs('downloads', exist_ok=True)
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                try:
+                    info = ydl.extract_info(url, download=True)
+                    
+                    # Save metadata
+                    metadata = {
+                        'title': info.get('title', ''),
+                        'description': info.get('description', ''),
+                        'uploader': info.get('uploader', ''),
+                        'duration': info.get('duration', 0),
+                        'view_count': info.get('view_count', 0),
+                        'like_count': info.get('like_count', 0),
+                        'upload_date': info.get('upload_date', ''),
+                        'tags': info.get('tags', []),
+                    }
+                    
+                    with open('downloads/metadata.json', 'w') as f:
+                        json.dump(metadata, f, indent=2)
+                    
+                    # Find the downloaded video file
+                    video_files = [f for f in os.listdir('downloads') if f.endswith(('.mp4', '.mkv', '.webm'))]
+                    if video_files:
+                        video_file = video_files[0]
+                        print(f"::set-output name=video_file::downloads/{video_file}")
+                        print(f"::set-output name=success::true")
+                        return True
+                    
+                except Exception as e:
+                    print(f"Error downloading video: {e}")
+                    print("::set-output name=success::false")
+                    return False
+
+        # Get Instagram URL from input or from a predefined list
+        instagram_url = "${{ github.event.inputs.instagram_url }}"
+        
+        if not instagram_url:
+            # You can maintain a list of Instagram accounts to check
+            # For demo purposes, we'll skip if no URL provided
+            print("No Instagram URL provided")
+            sys.exit(0)
+        
+        success = download_reel(instagram_url)
+        if not success:
+            sys.exit(1)
+        EOF
+
+    - name: Generate SEO Content
+      id: seo_content
+      if: steps.download.outputs.success == 'true'
+      run: |
+        python - <<EOF
+        import json
+        import openai
+        import os
+        import re
+
+        # Load metadata
+        with open('downloads/metadata.json', 'r') as f:
+            metadata = json.load(f)
+
+        client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+
+        def generate_seo_content(original_title, description, tags):
+            prompt = f"""
+            Create SEO-optimized YouTube content based on this Instagram Reel:
+            
+            Original Title: {original_title}
+            Description: {description}
+            Original Tags: {tags}
+            
+            Generate:
+            1. A catchy, SEO-friendly YouTube title (under 60 characters)
+            2. A compelling description (200-300 words) with relevant hashtags
+            3. 10-15 relevant tags for YouTube
+            
+            Focus on trending keywords, engagement, and YouTube Shorts optimization.
+            Format as JSON with keys: title, description, tags
+            """
+            
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=1000,
+                    temperature=0.7
+                )
+                
+                content = response.choices[0].message.content
+                # Extract JSON from response
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group())
+                else:
+                    # Fallback if JSON parsing fails
+                    return {
+                        "title": f"Amazing Short Video! {original_title[:30]}...",
+                        "description": f"Check out this incredible short video! {description}\n\n#Shorts #Viral #Trending #Entertainment",
+                        "tags": ["shorts", "viral", "trending", "entertainment", "funny", "amazing"]
+                    }
+            except Exception as e:
+                print(f"Error generating content: {e}")
+                return {
+                    "title": f"Amazing Short Video! {original_title[:30]}...",
+                    "description": f"Check out this incredible short video! {description}\n\n#Shorts #Viral #Trending #Entertainment",
+                    "tags": ["shorts", "viral", "trending", "entertainment", "funny", "amazing"]
+                }
+
+        seo_content = generate_seo_content(
+            metadata.get('title', ''),
+            metadata.get('description', ''),
+            metadata.get('tags', [])
+        )
+
+        # Save SEO content
+        with open('downloads/seo_content.json', 'w') as f:
+            json.dump(seo_content, f, indent=2)
+
+        print("SEO content generated successfully")
+        EOF
+
+    - name: Upload to YouTube
+      if: steps.download.outputs.success == 'true'
+      run: |
+        python - <<EOF
+        import json
+        import os
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
+        import glob
+
+        def get_youtube_service():
+            credentials = Credentials(
+                token=None,
+                refresh_token=os.getenv('YOUTUBE_REFRESH_TOKEN'),
+                token_uri='https://oauth2.googleapis.com/token',
+                client_id=os.getenv('YOUTUBE_CLIENT_ID'),
+                client_secret=os.getenv('YOUTUBE_CLIENT_SECRET')
+            )
+            
+            return build('youtube', 'v3', credentials=credentials)
+
+        def upload_video():
+            # Load SEO content
+            with open('downloads/seo_content.json', 'r') as f:
+                seo_content = json.load(f)
+            
+            # Find video file
+            video_files = glob.glob('downloads/*.mp4') + glob.glob('downloads/*.mkv') + glob.glob('downloads/*.webm')
+            if not video_files:
+                print("No video file found")
+                return False
+            
+            video_file = video_files[0]
+            
+            youtube = get_youtube_service()
+            
+            body = {
+                'snippet': {
+                    'title': seo_content['title'],
+                    'description': seo_content['description'],
+                    'tags': seo_content['tags'],
+                    'categoryId': '24',  # Entertainment category
+                    'defaultLanguage': 'en'
+                },
+                'status': {
+                    'privacyStatus': 'public',
+                    'selfDeclaredMadeForKids': False
+                }
+            }
+            
+            media = MediaFileUpload(
+                video_file,
+                chunksize=-1,
+                resumable=True,
+                mimetype='video/*'
+            )
+            
+            try:
+                request = youtube.videos().insert(
+                    part='snippet,status',
+                    body=body,
+                    media_body=media
+                )
+                
+                response = request.execute()
+                video_id = response['id']
+                print(f"Video uploaded successfully! Video ID: {video_id}")
+                print(f"Video URL: https://www.youtube.com/watch?v={video_id}")
+                return True
+                
+            except Exception as e:
+                print(f"Error uploading video: {e}")
+                return False
+
+        success = upload_video()
+        if not success:
+            exit(1)
+        EOF
+
+    - name: Cleanup
+      if: always()
+      run: |
+        rm -rf downloads/
+        echo "Cleanup completed"
+
+    - name: Notify on Success
+      if: success()
+      run: |
+        echo "✅ Workflow completed successfully!"
+        echo "Instagram Reel has been processed and uploaded to YouTube"
+
+    - name: Notify on Failure
+      if: failure()
+      run: |
+        echo "❌ Workflow failed!"
+        echo "Check the logs for error details"
