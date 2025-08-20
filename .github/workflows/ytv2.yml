@@ -1,14 +1,11 @@
-name: Instagram Reels to YouTube Shorts (Advanced SEO - Fixed)
+name: Instagram Reels to YouTube Shorts (Fixed & Enhanced)
 
 on:
-  schedule:
-    # Run daily at 9 AM UTC
-    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       instagram_url:
-        description: 'Instagram Reel URL (optional - for manual trigger)'
-        required: false
+        description: 'Instagram Reel URL'
+        required: true
         type: string
 
 env:
@@ -18,505 +15,175 @@ env:
   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
 jobs:
-  process-reels:
+  upload-short:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout repository
+    - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
-
-    - name: Cache Python packages
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-
-    - name: Install system dependencies
+    - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y ffmpeg
-        
-    - name: Install Python dependencies
-      run: |
-        pip install --upgrade pip
-        # Install latest yt-dlp for better Instagram support
-        pip install --upgrade yt-dlp
-        pip install google-auth==2.23.4
-        pip install google-auth-oauthlib==1.1.0
-        pip install google-auth-httplib2==0.1.1
-        pip install google-api-python-client==2.108.0
-        pip install openai==1.3.7
-        pip install requests==2.31.0
-        pip install beautifulsoup4==4.12.2
-        pip install opencv-python-headless==4.8.1.78
-        pip install pillow==10.1.0
-        pip install numpy==1.25.2
-        pip install scikit-learn==1.3.2
-        pip install nltk==3.8.1
-        pip install textblob==0.17.1
-        pip install pytrends==4.9.2
-        pip install instaloader==4.10.3
+        python -m pip install --upgrade pip
+        pip install yt-dlp openai google-api-python-client google-auth google-auth-oauthlib google-auth-httplib2 whisper ffmpeg-python
 
     - name: Download Instagram Reel
       id: download
       run: |
-        cat << 'SCRIPT_EOF' > download_script.py
-        import yt_dlp
-        import json
-        import os
-        import sys
-        import re
+        python - <<EOF
+import yt_dlp, os, json
 
-        def download_reel(url):
-            ydl_opts = {
-                'format': 'best[height<=1920]/best',
-                'outtmpl': 'downloads/%(id)s.%(ext)s',
-                'writeinfojson': True,
-                'no_warnings': False,
-                'extract_flat': False,
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-            }
-            
-            os.makedirs('downloads', exist_ok=True)
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                try:
-                    info = ydl.extract_info(url, download=True)
-                    
-                    # Clean metadata
-                    raw_title = info.get('title', 'Amazing Content')
-                    raw_description = info.get('description', '')
-                    
-                    cleaned_title = re.sub(r'\b(instagram|insta|reel|reels|ig)\b', '', raw_title, flags=re.IGNORECASE).strip()
-                    cleaned_description = re.sub(r'\b(instagram|insta|reel|reels|ig|follow me on instagram)\b', '', raw_description, flags=re.IGNORECASE).strip()
-                    
-                    metadata = {
-                        'cleaned_title': cleaned_title if cleaned_title else 'Amazing Content',
-                        'cleaned_description': cleaned_description,
-                        'duration': info.get('duration', 0),
-                        'view_count': info.get('view_count', 0),
-                        'tags': [tag for tag in info.get('tags', []) if 'instagram' not in tag.lower()],
-                        'id': info.get('id', ''),
-                        'categories': info.get('categories', [])
-                    }
-                    
-                    with open('downloads/metadata.json', 'w') as f:
-                        json.dump(metadata, f, indent=2)
-                    
-                    video_files = [f for f in os.listdir('downloads') if f.endswith(('.mp4', '.mkv', '.webm', '.mov'))]
-                    if video_files:
-                        video_file = video_files[0]
-                        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                            f.write(f"video_file=downloads/{video_file}\n")
-                            f.write(f"success=true\n")
-                        print(f"✅ Downloaded: {video_file}")
-                        return True
-                    
-                except Exception as e:
-                    print(f"Error downloading video: {e}")
-                    with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-                        f.write(f"success=false\n")
-                    return False
+url="${{ github.event.inputs.instagram_url }}"
+os.makedirs("downloads", exist_ok=True)
 
-        instagram_url = "${{ github.event.inputs.instagram_url }}"
-        if not instagram_url:
-            print("No Instagram URL provided")
-            sys.exit(0)
-        
-        print(f"Processing: {instagram_url}")
-        success = download_reel(instagram_url)
-        if not success:
-            sys.exit(1)
-        SCRIPT_EOF
-        
-        python download_script.py
+ydl_opts = {
+    "format": "best[height<=1920]/best",
+    "outtmpl": "downloads/%(id)s.%(ext)s",
+    "writeinfojson": True,
+    "http_headers": {"User-Agent": "Mozilla/5.0"}
+}
 
-    - name: Analyze Video Content  
-      id: analyze
+with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    info = ydl.extract_info(url, download=True)
+
+video_file = None
+for ext in [".mp4", ".mkv", ".webm"]:
+    for f in os.listdir("downloads"):
+        if f.endswith(ext):
+            video_file = f
+            break
+    if video_file:
+        break
+
+if not video_file:
+    raise Exception("Video download failed.")
+
+video_path = f"downloads/{video_file}"
+print(f"video_file={video_path}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
+print("success=true", file=open(os.environ["GITHUB_OUTPUT"], "a"))
+EOF
+
+    - name: Extract audio
       if: steps.download.outputs.success == 'true'
       run: |
-        cat << 'SCRIPT_EOF' > analyze_script.py
-        import cv2
-        import json
-        import os
-        import numpy as np
-        import glob
-        import subprocess
-        from collections import Counter
-        import re
+        ffmpeg -y -i "${{ steps.download.outputs.video_file }}" -vn -acodec pcm_s16le -ar 16000 -ac 1 downloads/audio.wav
 
-        def analyze_video(video_path):
-            try:
-                cap = cv2.VideoCapture(video_path)
-                if not cap.isOpened():
-                    return {'error': 'Cannot open video'}
-                
-                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                fps = int(cap.get(cv2.CAP_PROP_FPS))
-                duration = frame_count / fps if fps > 0 else 0
-                
-                # Sample a few frames for analysis
-                sample_frames = [0, frame_count//2, frame_count-1] if frame_count > 2 else [0]
-                brightness_values = []
-                
-                for frame_idx in sample_frames:
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, min(frame_idx, frame_count-1))
-                    ret, frame = cap.read()
-                    if ret:
-                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                        brightness = np.mean(gray)
-                        brightness_values.append(brightness)
-                
-                cap.release()
-                
-                avg_brightness = np.mean(brightness_values) if brightness_values else 128
-                brightness_category = "bright" if avg_brightness > 150 else "dark" if avg_brightness < 80 else "normal"
-                
-                return {
-                    'duration': duration,
-                    'fps': fps,
-                    'brightness_category': brightness_category,
-                    'frame_count': frame_count
-                }
-            except Exception as e:
-                return {'error': str(e), 'duration': 0, 'brightness_category': 'normal'}
-
-        def analyze_text(metadata):
-            from textblob import TextBlob
-            
-            try:
-                text_content = f"{metadata.get('cleaned_title', '')} {metadata.get('cleaned_description', '')}"
-                
-                if not text_content.strip():
-                    return {'sentiment': 'neutral', 'keywords': []}
-                
-                blob = TextBlob(text_content)
-                sentiment_score = blob.sentiment.polarity
-                sentiment = 'positive' if sentiment_score > 0.1 else 'negative' if sentiment_score < -0.1 else 'neutral'
-                
-                words = re.findall(r'\b\w+\b', text_content.lower())
-                common_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
-                keywords = [word for word in words if len(word) > 3 and word not in common_words]
-                keyword_freq = Counter(keywords)
-                
-                return {
-                    'sentiment': sentiment,
-                    'keywords': [word for word, count in keyword_freq.most_common(5)]
-                }
-            except Exception as e:
-                return {'sentiment': 'neutral', 'keywords': [], 'error': str(e)}
-
-        # Find video file
-        video_files = glob.glob('downloads/*.mp4') + glob.glob('downloads/*.mkv') + glob.glob('downloads/*.webm')
-        if not video_files:
-            print("No video file found")
-            exit(1)
-
-        video_file = video_files[0]
-        
-        with open('downloads/metadata.json', 'r') as f:
-            metadata = json.load(f)
-        
-        print("Analyzing content...")
-        visual_analysis = analyze_video(video_file)
-        text_analysis = analyze_text(metadata)
-        
-        content_analysis = {
-            'visual': visual_analysis,
-            'text': text_analysis,
-            'video_file': video_file
-        }
-        
-        with open('downloads/content_analysis.json', 'w') as f:
-            json.dump(content_analysis, f, indent=2)
-        
-        print("✅ Analysis completed")
-        print(f"Duration: {visual_analysis.get('duration', 0):.1f}s")
-        print(f"Brightness: {visual_analysis.get('brightness_category', 'unknown')}")
-        print(f"Sentiment: {text_analysis.get('sentiment', 'neutral')}")
-        SCRIPT_EOF
-        
-        python analyze_script.py
-
-    - name: Generate SEO Content
-      id: seo
+    - name: Transcribe audio
       if: steps.download.outputs.success == 'true'
       run: |
-        cat << 'SCRIPT_EOF' > seo_script.py
-        import json
-        import openai
-        import os
-        import re
-        import random
+        python - <<EOF
+import whisper, json
 
-        def get_trending_keywords():
-            # Fallback trending topics since PyTrends can be unreliable in CI
-            return [
-                "viral", "amazing", "incredible", "must watch", "epic",
-                "satisfying", "mind blowing", "unexpected", "wholesome",
-                "creative", "talent", "skills", "life hack", "wow"
-            ]
+model = whisper.load_model("base")
+result = model.transcribe("downloads/audio.wav")
 
-        def categorize_content(visual_analysis, text_analysis):
-            categories = []
-            
-            duration = visual_analysis.get('duration', 0)
-            brightness = visual_analysis.get('brightness_category', 'normal')
-            sentiment = text_analysis.get('sentiment', 'neutral')
-            keywords = text_analysis.get('keywords', [])
-            
-            if duration < 15:
-                categories.append("quick")
-            elif duration > 45:
-                categories.append("detailed")
-            
-            if brightness == "bright":
-                categories.extend(["vibrant", "colorful"])
-            elif brightness == "dark":
-                categories.extend(["dramatic", "moody"])
-            
-            if sentiment == "positive":
-                categories.extend(["uplifting", "positive"])
-            elif sentiment == "negative":
-                categories.extend(["dramatic", "intense"])
-            else:
-                categories.extend(["informative"])
-            
-            # Keyword-based categorization
-            for keyword in keywords[:3]:
-                if any(word in keyword.lower() for word in ['dance', 'music']):
-                    categories.extend(["entertainment", "music"])
-                elif any(word in keyword.lower() for word in ['food', 'recipe']):
-                    categories.extend(["food", "cooking"])
-                elif any(word in keyword.lower() for word in ['funny', 'comedy']):
-                    categories.extend(["comedy", "funny"])
-            
-            return list(set(categories[:8]))
+with open("downloads/transcript.json", "w", encoding="utf-8") as f:
+    json.dump(result, f, ensure_ascii=False, indent=2)
+EOF
 
-        def generate_seo_content(metadata, content_analysis, trending_keywords):
-            visual = content_analysis.get('visual', {})
-            text = content_analysis.get('text', {})
-            categories = categorize_content(visual, text)
-            
-            client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-            
-            prompt = f"""Create YouTube Shorts SEO content based on this analysis:
+    - name: Generate YouTube metadata
+      if: steps.download.outputs.success == 'true'
+      run: |
+        python - <<EOF
+import os, openai, json, re
 
-        - Duration: {visual.get('duration', 0):.1f} seconds
-        - Brightness: {visual.get('brightness_category', 'normal')}
-        - Sentiment: {text.get('sentiment', 'neutral')}  
-        - Keywords: {text.get('keywords', [])}
-        - Categories: {categories}
-        - Trending: {trending_keywords[:5]}
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-        Create:
-        1. Title (50 chars max): Hook + power words, NO Instagram references
-        2. Description (300 words): Value + CTA + hashtags
-        3. Tags (15 tags): Content-focused, trending terms
+with open("downloads/transcript.json", "r") as f:
+    transcript = json.load(f)
 
-        Return JSON only:
-        {{
-          "title": "engaging title here",
-          "description": "full description with hashtags", 
-          "tags": ["tag1", "tag2", "etc"],
-          "target_audience": "audience description"
-        }}"""
-            
-            try:
-                response = client.chat.completions.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=1000,
-                    temperature=0.7
-                )
-                
-                content = response.choices[0].message.content.strip()
-                json_match = re.search(r'\{.*\}', content, re.DOTALL)
-                
-                if json_match:
-                    try:
-                        return json.loads(json_match.group())
-                    except:
-                        pass
-                
-                return create_fallback_seo(categories, trending_keywords)
-                
-            except Exception as e:
-                print(f"OpenAI error: {e}")
-                return create_fallback_seo(categories, trending_keywords)
+text = transcript.get("text", "")
 
-        def create_fallback_seo(categories, trending_keywords):
-            power_words = ["🔥", "💯", "🤯", "⚡", "✨"]  
-            descriptors = ["Epic", "Amazing", "Incredible", "Unbelievable"]
-            
-            title = f"{random.choice(power_words)} {random.choice(descriptors)} {categories[0].title() if categories else 'Content'}"[:50]
-            
-            description = f"""🎯 This {categories[0] if categories else 'amazing'} content will blow your mind!
+prompt = f"""
+Create a catchy YouTube Shorts title (with emojis & #shorts), description (200-300 words), and 10-15 tags.
+Mix Hindi & English. Use the transcript for context.
+Return JSON only:
+{{"title":"...","description":"...","tags":["tag1"]}}
+Transcript: {text}
+"""
 
-        ⚡ What you'll see:
-        • Incredible moments that will amaze you
-        • Content that's trending everywhere
-        • Pure entertainment at its finest
+response = openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": prompt}],
+    temperature=0.7,
+    max_tokens=1200
+)
 
-        🔔 SUBSCRIBE for more viral content!
-        👀 Watch until the end for the best part
-        💬 Comment your thoughts below
+content = response.choices[0].message.content
+match = re.search(r"\{.*\}", content, re.DOTALL)
 
-        #{' #'.join(['Shorts', 'Viral', 'Amazing', 'Epic', 'Trending', 'MustWatch', 'Incredible', 'Entertainment', 'Satisfying', 'MindBlowing'])}"""
-            
-            tags = [
-                "shorts", "viral", "amazing", "epic", "incredible", "trending",
-                "must watch", "entertainment", "satisfying", "mind blowing"
-            ] + categories[:5] + trending_keywords[:5]
-            
-            return {
-                "title": title,
-                "description": description, 
-                "tags": list(set(tags))[:15],
-                "target_audience": "Entertainment seekers"
-            }
+seo = {"title": "🔥 Shorts Video #shorts", "description": "Watch now!", "tags": ["shorts"]}
 
-        # Load data
-        with open('downloads/metadata.json', 'r') as f:
-            metadata = json.load(f)
-        
-        with open('downloads/content_analysis.json', 'r') as f:
-            content_analysis = json.load(f)
-        
-        trending_keywords = get_trending_keywords()
-        seo_content = generate_seo_content(metadata, content_analysis, trending_keywords)
-        
-        with open('downloads/seo_content.json', 'w') as f:
-            json.dump(seo_content, f, indent=2)
-        
-        print("✅ SEO content generated")
-        print(f"Title: {seo_content['title']}")
-        print(f"Tags: {len(seo_content['tags'])} tags")
-        SCRIPT_EOF
-        
-        python seo_script.py
+if match:
+    try:
+        seo = json.loads(match.group())
+    except Exception as e:
+        print("⚠️ Failed to parse SEO JSON. Using default.")
+
+with open("downloads/seo_content.json", "w") as f:
+    json.dump(seo, f, indent=2)
+EOF
 
     - name: Upload to YouTube
       if: steps.download.outputs.success == 'true'
       run: |
-        cat << 'SCRIPT_EOF' > upload_script.py
-        import json
-        import os
-        from google.oauth2.credentials import Credentials
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaFileUpload
-        import glob
+        python - <<EOF
+import os, json
+from glob import glob
+from mimetypes import guess_type
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
-        def get_youtube_service():
-            credentials = Credentials(
-                token=None,
-                refresh_token=os.getenv('YOUTUBE_REFRESH_TOKEN'),
-                token_uri='https://oauth2.googleapis.com/token',
-                client_id=os.getenv('YOUTUBE_CLIENT_ID'),
-                client_secret=os.getenv('YOUTUBE_CLIENT_SECRET')
-            )
-            return build('youtube', 'v3', credentials=credentials)
+with open("downloads/seo_content.json", "r") as f:
+    seo = json.load(f)
 
-        def upload_video():
-            with open('downloads/seo_content.json', 'r') as f:
-                seo_content = json.load(f)
-            
-            video_files = glob.glob('downloads/*.mp4') + glob.glob('downloads/*.mkv') + glob.glob('downloads/*.webm')
-            if not video_files:
-                print("No video file found")
-                return False
-            
-            video_file = video_files[0]
-            youtube = get_youtube_service()
-            
-            body = {
-                'snippet': {
-                    'title': seo_content['title'],
-                    'description': seo_content['description'],
-                    'tags': seo_content['tags'][:15],
-                    'categoryId': '24',  # Entertainment
-                    'defaultLanguage': 'en'
-                },
-                'status': {
-                    'privacyStatus': 'public',
-                    'selfDeclaredMadeForKids': False
-                }
-            }
-            
-            media = MediaFileUpload(video_file, chunksize=-1, resumable=True, mimetype='video/*')
-            
-            try:
-                request = youtube.videos().insert(part='snippet,status', body=body, media_body=media)
-                response = request.execute()
-                video_id = response['id']
-                
-                print(f"✅ Upload successful!")
-                print(f"📱 Shorts URL: https://www.youtube.com/shorts/{video_id}")
-                print(f"🎥 Video URL: https://www.youtube.com/watch?v={video_id}")
-                
-                # Save upload info
-                upload_info = {
-                    'video_id': video_id,
-                    'shorts_url': f"https://www.youtube.com/shorts/{video_id}",
-                    'video_url': f"https://www.youtube.com/watch?v={video_id}",
-                    'title': seo_content['title']
-                }
-                
-                with open('upload_success.json', 'w') as f:
-                    json.dump(upload_info, f, indent=2)
-                
-                return True
-                
-            except Exception as e:
-                print(f"Upload error: {e}")
-                return False
+video_files = [f for f in glob("downloads/*") if f.endswith((".mp4", ".mkv", ".webm"))]
+if not video_files:
+    raise Exception("No video file found.")
+video_file = video_files[0]
 
-        success = upload_video()
-        if not success:
-            exit(1)
-        SCRIPT_EOF
-        
-        python upload_script.py
+mime_type = guess_type(video_file)[0] or "video/mp4"
+
+creds = Credentials(
+    token=None,
+    refresh_token=os.environ["YOUTUBE_REFRESH_TOKEN"],
+    client_id=os.environ["YOUTUBE_CLIENT_ID"],
+    client_secret=os.environ["YOUTUBE_CLIENT_SECRET"],
+    token_uri="https://oauth2.googleapis.com/token"
+)
+
+youtube = build("youtube", "v3", credentials=creds)
+
+request = youtube.videos().insert(
+    part="snippet,status",
+    body={
+        "snippet": {
+            "title": seo.get("title", "🔥 Shorts Video #shorts"),
+            "description": seo.get("description", "Watch now!"),
+            "tags": seo.get("tags", ["shorts"]),
+            "categoryId": "24"
+        },
+        "status": {
+            "privacyStatus": "public",
+            "selfDeclaredMadeForKids": False
+        }
+    },
+    media_body=MediaFileUpload(video_file, mimetype=mime_type)
+)
+
+response = request.execute()
+link = f"https://www.youtube.com/watch?v={response['id']}"
+
+print("✅ Uploaded Video Link:", link)
+
+with open("downloads/video_link.txt", "w") as f:
+    f.write(link)
+EOF
 
     - name: Cleanup
       if: always()
-      run: |
-        rm -f *.py
-        rm -rf downloads/
-        echo "✅ Cleanup completed"
-
-    - name: Success Summary
-      if: success()
-      run: |
-        echo "🎉 WORKFLOW COMPLETED SUCCESSFULLY!"
-        echo "=================================="
-        if [ -f "upload_success.json" ]; then
-          echo "📊 Upload Details:"
-          cat upload_success.json
-        fi
-        echo ""
-        echo "✅ Features Applied:"
-        echo "   • Content analysis and categorization"  
-        echo "   • AI-powered SEO optimization"
-        echo "   • Trending keyword integration"
-        echo "   • YouTube Shorts algorithm optimization"
-        echo "   • Clean metadata (no Instagram references)"
-
-    - name: Failure Notification
-      if: failure()
-      run: |
-        echo "❌ Workflow failed. Check logs above for details."
-        echo "Common issues:"
-        echo "   • Invalid Instagram URL"
-        echo "   • Missing API keys"
-        echo "   • Network connectivity"
-        echo "   • Video processing errors"
+      run: rm -rf downloads/
+      
