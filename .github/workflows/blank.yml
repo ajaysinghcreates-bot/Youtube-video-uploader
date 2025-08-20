@@ -212,11 +212,11 @@ jobs:
             Focus on: engagement, discoverability, YouTube Shorts algorithm
             
             Return as JSON format:
-            {
+            {{
               "title": "your catchy title here",
               "description": "your full description with hashtags",
               "tags": ["tag1", "tag2", "etc"]
-            }
+            }}
             """
             
             try:
