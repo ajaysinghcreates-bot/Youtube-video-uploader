@@ -1,4 +1,4 @@
-name: Instagram Reels to YouTube Shorts (Vosk + Enhanced SEO)
+name: Instagram Reels to YouTube Shorts (Vosk + SEO)
 
 on:
   workflow_dispatch:
@@ -33,7 +33,7 @@ jobs:
       id: download
       run: |
         cat <<EOF | python3
-        import yt_dlp, os
+        import yt_dlp, os, json
 
         url = '${{ github.event.inputs.instagram_url }}'
         os.makedirs('downloads', exist_ok=True)
@@ -46,24 +46,30 @@ jobs:
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-          info = ydl.extract_info(url, download=True)
+            info = ydl.extract_info(url, download=True)
 
+        # Save metadata
+        metadata_path = 'downloads/metadata.json'
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(info, f, ensure_ascii=False, indent=2)
+
+        # Get the video file
         video_file = None
         for ext in ['.mp4', '.mkv', '.webm']:
-          for f in os.listdir('downloads'):
-            if f.endswith(ext):
-              video_file = f
-              break
-          if video_file:
-            break
+            for f in os.listdir('downloads'):
+                if f.endswith(ext):
+                    video_file = f
+                    break
+            if video_file:
+                break
 
         if not video_file:
-          raise Exception('Video download failed.')
+            raise Exception('Video download failed.')
 
         video_path = f'downloads/{video_file}'
         with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
-          fh.write(f'video_file={video_path}\n')
-          fh.write('success=true\n')
+            fh.write(f'video_file={video_path}\n')
+            fh.write('success=true\n')
         EOF
 
     - name: Extract audio
@@ -79,13 +85,12 @@ jobs:
         mv vosk-model-small-en-us-0.15 model
 
         cat <<EOF | python3
-        import wave
-        import json
+        import wave, json
         from vosk import Model, KaldiRecognizer
 
         wf = wave.open("downloads/audio.wav", "rb")
-        if wf.getnchannels() != 1 or wf.getsampwidth() != 2 or wf.getframerate() not in [8000, 16000, 44100]:
-            raise ValueError("Audio must be WAV mono PCM with supported sample rate.")
+        if wf.getnchannels() != 1 or wf.getsampwidth() != 2:
+            raise ValueError("Audio must be mono PCM.")
 
         model = Model("model")
         rec = KaldiRecognizer(model, wf.getframerate())
@@ -105,59 +110,62 @@ jobs:
             json.dump(final_result, f, ensure_ascii=False, indent=2)
         EOF
 
-    - name: Generate YouTube metadata (SEO optimized)
+    - name: Generate YouTube Shorts metadata
       if: steps.download.outputs.success == 'true'
       run: |
         cat <<EOF | python3
-        import os, openai, json, re
+        import os, json, re, openai
 
         openai.api_key = os.getenv('OPENAI_API_KEY')
 
-        with open('downloads/transcript.json', 'r') as f:
+        # Load transcript and Instagram metadata
+        with open('downloads/transcript.json', 'r', encoding='utf-8') as f:
             transcript = json.load(f)
 
-        with open('downloads/metadata.json', 'r') as f:
-            insta_meta = json.load(f)
+        with open('downloads/metadata.json', 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
 
         text = transcript.get('text', '')
-        insta_title = insta_meta.get('title', '')
+        insta_title = metadata.get('title', '')
 
         prompt = f"""
-        You are a YouTube Shorts SEO expert. 
-        Use Instagram title: '{insta_title}' and transcript: '{text}' to generate optimized YouTube Shorts metadata.
+        You are a YouTube Shorts SEO expert.
+        Using the Instagram title: '{insta_title}' and the transcript: '{text}', generate:
 
-        Requirements:
-        1. Title: Catchy, emojis, #shorts, Hindi-English mix, under 100 characters.
-        2. Description: 300-5000 words, engaging, natural keywords, hashtags, call-to-action.
-        3. Tags: 20 relevant tags, trending, mix Hindi-English.
+        - A catchy YouTube Shorts title under 100 chars (use emojis + #shorts, mix Hindi & English)
+        - A description under 5000 words with keywords + hashtags
+        - 20 SEO-friendly tags
 
         Return JSON only:
-        {{"title":"...","description":"...","tags":["tag1","tag2",...,"tag20"]}}
+        {{
+          "title":"...",
+          "description":"...",
+          "tags":["tag1","tag2",...]
+        }}
         """
 
         response = openai.chat.completions.create(
             model='gpt-4o-mini',
             messages=[{'role':'user','content':prompt}],
             temperature=0.7,
-            max_tokens=2000
+            max_tokens=1200
         )
 
         content = response.choices[0].message.content
         match = re.search(r'\{.*\}', content, re.DOTALL)
 
         seo = {
-            'title': '🔥 Shorts Video #shorts',
-            'description': 'Watch now!',
-            'tags': ['shorts']*20
+            "title": "🔥 Shorts Video #shorts",
+            "description": "Watch now!",
+            "tags": ["shorts"]
         }
-
         if match:
             try:
                 seo = json.loads(match.group())
             except:
                 pass
 
-        with open('downloads/seo_content.json', 'w') as f:
+        with open('downloads/seo_content.json', 'w', encoding='utf-8') as f:
             json.dump(seo, f, indent=2)
         EOF
 
@@ -177,7 +185,7 @@ jobs:
 
         video_files = [f for f in glob('downloads/*') if f.endswith(('.mp4','.mkv','.webm'))]
         if not video_files:
-            raise Exception('No video file found.')
+            raise Exception('No video found')
         video_file = video_files[0]
 
         mime_type = guess_type(video_file)[0] or 'video/mp4'
@@ -196,24 +204,24 @@ jobs:
             part='snippet,status',
             body={
                 'snippet': {
-                    'title': seo.get('title','🔥 Shorts Video #shorts'),
-                    'description': seo.get('description','Watch now!'),
-                    'tags': seo.get('tags',['shorts']*20),
-                    'categoryId': '24'
+                    'title': seo.get('title'),
+                    'description': seo.get('description'),
+                    'tags': seo.get('tags'),
+                    'categoryId':'24'
                 },
                 'status': {
                     'privacyStatus':'public',
-                    'selfDeclaredMadeForKids':False
+                    'selfDeclaredMadeForKids': False
                 }
             },
             media_body=MediaFileUpload(video_file, mimetype=mime_type)
         )
 
         response = request.execute()
-        link = f'https://www.youtube.com/watch?v={response["id"]}'
+        link = f"https://www.youtube.com/watch?v={response['id']}"
         print('✅ Uploaded Video Link:', link)
 
-        with open('downloads/video_link.txt','w') as f:
+        with open('downloads/video_link.txt', 'w') as f:
             f.write(link)
         EOF
 
