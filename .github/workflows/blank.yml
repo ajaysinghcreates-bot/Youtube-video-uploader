@@ -1,14 +1,11 @@
-name: Instagram Reels to YouTube Shorts (SEO Auto)
+name: Instagram Reels to YouTube Shorts (Auto Upload)
 
 on:
-  schedule:
-    # Run daily at 9 AM UTC
-    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       instagram_url:
-        description: 'Instagram Reel URL (optional - for manual trigger)'
-        required: false
+        description: 'Instagram Reel URL'
+        required: true
         type: string
 
 env:
@@ -21,7 +18,7 @@ jobs:
   process:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Install dependencies
@@ -29,26 +26,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
           pip install --upgrade pip
-          pip install --upgrade yt-dlp google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client requests beautifulsoup4 ffmpeg-python
-          # ✅ Reinstall OpenAI and HTTPX to fix proxies bug
+          pip install --upgrade yt-dlp google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client requests ffmpeg-python
           pip install --force-reinstall "openai==1.51.0" "httpx==0.27.2"
           pip install --upgrade git+https://github.com/openai/whisper.git
 
       - name: Download Instagram Reel
         run: |
           mkdir -p downloads
-          if [ -n "${{ github.event.inputs.instagram_url }}" ]; then
-            yt-dlp -f mp4 -o "downloads/video.mp4" "${{ github.event.inputs.instagram_url }}"
-          else
-            echo "No URL provided, exiting."
-            exit 1
-          fi
+          yt-dlp -f mp4 -o "downloads/video.mp4" "${{ github.event.inputs.instagram_url }}"
 
-      - name: Extract Audio
-        run: |
-          ffmpeg -i downloads/video.mp4 -vn -acodec mp3 downloads/audio.mp3
+      - name: Extract audio
+        run: ffmpeg -i downloads/video.mp4 -vn -acodec mp3 downloads/audio.mp3
 
-      - name: Transcribe Audio
+      - name: Transcribe audio
         run: |
           python - <<EOF
           import whisper, json
@@ -59,34 +49,39 @@ jobs:
           print("✅ Transcript saved")
           EOF
 
-      - name: Generate SEO Metadata
+      - name: Generate SEO metadata
         run: |
           python - <<EOF
-          import json, re, openai, os
+          import json, openai, re
 
           with open("downloads/transcript.json", "r", encoding="utf-8") as f:
               transcript = json.load(f)
 
-          full_text = transcript.get("text", "")
+          text = transcript.get("text", "")
 
           prompt = f"""
-          Based on this transcript, generate optimized YouTube Shorts metadata.
+          You are a YouTube SEO expert. Based ONLY on this transcript, generate metadata for a YouTube Short.
 
           Transcript:
-          {full_text}
+          {text}
 
-          Return JSON only:
+          Rules:
+          - Title: Catchy, 5-10 words, directly related to transcript
+          - Description: 200-300 words, summarize transcript naturally, add 10-15 relevant hashtags
+          - Tags: 15-25 related keywords, no duplicates, short phrases
+
+          Respond in pure JSON only:
           {{
-            "title": "catchy short title",
-            "description": "200-300 word engaging description with hashtags",
-            "tags": ["tag1","tag2","tag3"]
+            "title": "...",
+            "description": "...",
+            "tags": ["...","..."]
           }}
           """
 
           response = openai.chat.completions.create(
               model="gpt-4o-mini",
               messages=[{"role": "user", "content": prompt}],
-              max_tokens=1200,
+              max_tokens=800,
               temperature=0.7
           )
 
@@ -98,15 +93,52 @@ jobs:
               try:
                   seo_json = json.loads(match.group())
               except:
-                  seo_json = {"title": "Fallback Title", "description": "Fallback Description", "tags":["shorts"]}
+                  seo_json = {"title":"Untitled Short","description":"No description","tags":["shorts"]}
           else:
-              seo_json = {"title": "Fallback Title", "description": "Fallback Description", "tags":["shorts"]}
+              seo_json = {"title":"Untitled Short","description":"No description","tags":["shorts"]}
 
           with open("downloads/seo_content.json", "w", encoding="utf-8") as f:
               json.dump(seo_json, f, indent=2)
 
-          print("✅ SEO content generated from transcript")
+          print("✅ SEO metadata ready")
           EOF
 
-      - name: Show generated SEO content
-        run: cat downloads/seo_content.json
+      - name: Upload to YouTube
+        run: |
+          python - <<EOF
+          import os, json, google.auth.transport.requests
+          from google.oauth2.credentials import Credentials
+          from googleapiclient.discovery import build
+
+          creds = Credentials(
+              None,
+              refresh_token=os.environ["YOUTUBE_REFRESH_TOKEN"],
+              client_id=os.environ["YOUTUBE_CLIENT_ID"],
+              client_secret=os.environ["YOUTUBE_CLIENT_SECRET"],
+              token_uri="https://oauth2.googleapis.com/token"
+          )
+
+          youtube = build("youtube", "v3", credentials=creds)
+
+          with open("downloads/seo_content.json", "r", encoding="utf-8") as f:
+              seo = json.load(f)
+
+          request = youtube.videos().insert(
+              part="snippet,status",
+              body={
+                  "snippet": {
+                      "title": seo["title"],
+                      "description": seo["description"],
+                      "tags": seo["tags"],
+                      "categoryId": "22"  # People & Blogs
+                  },
+                  "status": {
+                      "privacyStatus": "public",
+                      "selfDeclaredMadeForKids": False
+                  }
+              },
+              media_body="downloads/video.mp4"
+          )
+          response = request.execute()
+          print("✅ Uploaded to YouTube:", response["id"])
+          EOF
