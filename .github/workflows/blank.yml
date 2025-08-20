@@ -69,8 +69,6 @@ jobs:
 
           full_text = transcript.get("text", "")
 
-          client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
           prompt = f"""
           Based on this transcript, generate optimized YouTube Shorts metadata.
 
@@ -85,7 +83,7 @@ jobs:
           }}
           """
 
-          response = client.chat.completions.create(
+          response = openai.chat.completions.create(
               model="gpt-4o-mini",
               messages=[{"role": "user", "content": prompt}],
               max_tokens=1200,
