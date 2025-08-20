@@ -1,4 +1,4 @@
-name: Instagram Reels to YouTube Shorts (Fixed)
+name: Instagram Reels to YouTube Shorts (Fixed & Enhanced)
 
 on:
   workflow_dispatch:
@@ -33,36 +33,54 @@ jobs:
       id: download
       run: |
         python - <<EOF
-import yt_dlp, os, json, sys
+import yt_dlp, os, json
+
 url="${{ github.event.inputs.instagram_url }}"
 os.makedirs("downloads", exist_ok=True)
+
 ydl_opts = {
-    "format":"best[height<=1920]/best",
-    "outtmpl":"downloads/%(id)s.%(ext)s",
-    "writeinfojson":True,
-    "http_headers":{"User-Agent":"Mozilla/5.0"}
+    "format": "best[height<=1920]/best",
+    "outtmpl": "downloads/%(id)s.%(ext)s",
+    "writeinfojson": True,
+    "http_headers": {"User-Agent": "Mozilla/5.0"}
 }
+
 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
     info = ydl.extract_info(url, download=True)
-video_file = [f for f in os.listdir("downloads") if f.endswith((".mp4",".mkv",".webm"))][0]
-print(f"video_file=downloads/{video_file}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
+
+video_file = None
+for ext in [".mp4", ".mkv", ".webm"]:
+    for f in os.listdir("downloads"):
+        if f.endswith(ext):
+            video_file = f
+            break
+    if video_file:
+        break
+
+if not video_file:
+    raise Exception("Video download failed.")
+
+video_path = f"downloads/{video_file}"
+print(f"video_file={video_path}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
 print("success=true", file=open(os.environ["GITHUB_OUTPUT"], "a"))
 EOF
 
     - name: Extract audio
       if: steps.download.outputs.success == 'true'
       run: |
-        ffmpeg -i ${{ steps.download.outputs.video_file }} -vn -acodec pcm_s16le -ar 16000 -ac 1 downloads/audio.wav
+        ffmpeg -y -i "${{ steps.download.outputs.video_file }}" -vn -acodec pcm_s16le -ar 16000 -ac 1 downloads/audio.wav
 
     - name: Transcribe audio
       if: steps.download.outputs.success == 'true'
       run: |
         python - <<EOF
 import whisper, json
+
 model = whisper.load_model("base")
 result = model.transcribe("downloads/audio.wav")
-with open("downloads/transcript.json","w",encoding="utf-8") as f:
-    json.dump(result,f,ensure_ascii=False,indent=2)
+
+with open("downloads/transcript.json", "w", encoding="utf-8") as f:
+    json.dump(result, f, ensure_ascii=False, indent=2)
 EOF
 
     - name: Generate YouTube metadata
@@ -70,72 +88,102 @@ EOF
       run: |
         python - <<EOF
 import os, openai, json, re
+
 openai.api_key = os.getenv("OPENAI_API_KEY")
-with open("downloads/transcript.json","r") as f:
-    transcript=json.load(f)
-text=transcript.get("text","")
-prompt=f"""
+
+with open("downloads/transcript.json", "r") as f:
+    transcript = json.load(f)
+
+text = transcript.get("text", "")
+
+prompt = f"""
 Create a catchy YouTube Shorts title (with emojis & #shorts), description (200-300 words), and 10-15 tags.
 Mix Hindi & English. Use the transcript for context.
 Return JSON only:
 {{"title":"...","description":"...","tags":["tag1"]}}
 Transcript: {text}
 """
-response=openai.chat.completions.create(
+
+response = openai.chat.completions.create(
     model="gpt-4o-mini",
-    messages=[{"role":"user","content":prompt}],
+    messages=[{"role": "user", "content": prompt}],
     temperature=0.7,
     max_tokens=1200
 )
-content=response.choices[0].message.content
-match=re.search(r"\{.*\}",content,re.DOTALL)
-seo={}
+
+content = response.choices[0].message.content
+match = re.search(r"\{.*\}", content, re.DOTALL)
+
+seo = {"title": "🔥 Shorts Video #shorts", "description": "Watch now!", "tags": ["shorts"]}
+
 if match:
     try:
-        seo=json.loads(match.group())
-    except:
-        seo={"title":"🔥 Shorts Video #shorts","description":"Watch now!","tags":["shorts"]}
-else:
-    seo={"title":"🔥 Shorts Video #shorts","description":"Watch now!","tags":["shorts"]}
-with open("downloads/seo_content.json","w") as f:
-    json.dump(seo,f,indent=2)
+        seo = json.loads(match.group())
+    except Exception as e:
+        print("⚠️ Failed to parse SEO JSON. Using default.")
+
+with open("downloads/seo_content.json", "w") as f:
+    json.dump(seo, f, indent=2)
 EOF
 
     - name: Upload to YouTube
       if: steps.download.outputs.success == 'true'
       run: |
         python - <<EOF
-import os, json, glob
+import os, json
+from glob import glob
+from mimetypes import guess_type
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-with open("downloads/seo_content.json","r") as f:
-    seo=json.load(f)
-video_file = glob.glob("downloads/*.*")[0]
+with open("downloads/seo_content.json", "r") as f:
+    seo = json.load(f)
+
+video_files = [f for f in glob("downloads/*") if f.endswith((".mp4", ".mkv", ".webm"))]
+if not video_files:
+    raise Exception("No video file found.")
+video_file = video_files[0]
+
+mime_type = guess_type(video_file)[0] or "video/mp4"
+
 creds = Credentials(
     token=None,
-    refresh_token=os.environ['YOUTUBE_REFRESH_TOKEN'],
-    client_id=os.environ['YOUTUBE_CLIENT_ID'],
-    client_secret=os.environ['YOUTUBE_CLIENT_SECRET'],
+    refresh_token=os.environ["YOUTUBE_REFRESH_TOKEN"],
+    client_id=os.environ["YOUTUBE_CLIENT_ID"],
+    client_secret=os.environ["YOUTUBE_CLIENT_SECRET"],
     token_uri="https://oauth2.googleapis.com/token"
 )
-youtube = build("youtube","v3",credentials=creds)
-request=youtube.videos().insert(
+
+youtube = build("youtube", "v3", credentials=creds)
+
+request = youtube.videos().insert(
     part="snippet,status",
     body={
-        "snippet":{"title":seo["title"],"description":seo["description"],"tags":seo["tags"],"categoryId":"24"},
-        "status":{"privacyStatus":"public","selfDeclaredMadeForKids":False}
+        "snippet": {
+            "title": seo.get("title", "🔥 Shorts Video #shorts"),
+            "description": seo.get("description", "Watch now!"),
+            "tags": seo.get("tags", ["shorts"]),
+            "categoryId": "24"
+        },
+        "status": {
+            "privacyStatus": "public",
+            "selfDeclaredMadeForKids": False
+        }
     },
-    media_body=MediaFileUpload(video_file,mimetype="video/*")
+    media_body=MediaFileUpload(video_file, mimetype=mime_type)
 )
-resp=request.execute()
-link=f"https://www.youtube.com/watch?v={resp['id']}"
-print("✅ Uploaded Video Link:",link)
-with open("downloads/video_link.txt","w") as f:
+
+response = request.execute()
+link = f"https://www.youtube.com/watch?v={response['id']}"
+
+print("✅ Uploaded Video Link:", link)
+
+with open("downloads/video_link.txt", "w") as f:
     f.write(link)
 EOF
 
     - name: Cleanup
       if: always()
       run: rm -rf downloads/
+      
