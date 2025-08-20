@@ -118,53 +118,59 @@ jobs:
       if: steps.download.outputs.success == 'true'
       run: |
         python - <<EOF
-        import json, os, re, openai
+import json, os, re, openai
 
-        with open("downloads/transcript.json", "r", encoding="utf-8") as f:
-            transcript = json.load(f)
+# Load transcript
+with open("downloads/transcript.json", "r", encoding="utf-8") as f:
+    transcript = json.load(f)
 
-        full_text = transcript.get("text", "")
+full_text = transcript.get("text", "")
 
-        client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Set API key (no client object needed)
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-        prompt = f"""
-        Based on this transcript, generate optimized YouTube Shorts metadata.
+prompt = f"""
+Based on this transcript, generate optimized YouTube Shorts metadata.
 
-        Transcript:
-        {full_text}
+Transcript:
+{full_text}
 
-        Return JSON only:
-        {{
-          "title": "catchy short title",
-          "description": "200-300 word engaging description with hashtags",
-          "tags": ["tag1","tag2","tag3"]
-        }}
-        """
+Return JSON only:
+{{
+  "title": "catchy short title",
+  "description": "200-300 word engaging description with hashtags",
+  "tags": ["tag1","tag2","tag3"]
+}}
+"""
 
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1200,
-            temperature=0.7
-        )
+# Call the API directly
+response = openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": prompt}],
+    max_tokens=1200,
+    temperature=0.7
+)
 
-        content = response.choices[0].message.content
-        match = re.search(r"\{.*\}", content, re.DOTALL)
+content = response.choices[0].message.content
+match = re.search(r"\{.*\}", content, re.DOTALL)
 
-        seo_json = {}
-        if match:
-            try:
-                seo_json = json.loads(match.group())
-            except:
-                seo_json = {"title": "Fallback Title", "description": "Fallback Description", "tags":["shorts"]}
-        else:
-            seo_json = {"title": "Fallback Title", "description": "Fallback Description", "tags":["shorts"]}
+seo_json = {}
+if match:
+    try:
+        seo_json = json.loads(match.group())
+    except Exception:
+        seo_json = {"title": "Fallback Title", "description": "Fallback Description", "tags": ["shorts"]}
+else:
+    seo_json = {"title": "Fallback Title", "description": "Fallback Description", "tags": ["shorts"]}
 
-        with open("downloads/seo_content.json", "w", encoding="utf-8") as f:
-            json.dump(seo_json, f, indent=2)
+# Save results
+with open("downloads/seo_content.json", "w", encoding="utf-8") as f:
+    json.dump(seo_json, f, indent=2)
 
-        print("✅ SEO content generated from transcript")
-        EOF
+print("✅ SEO content generated from transcript")
+EOF
+
+            
 
     - name: Upload to YouTube
       if: steps.download.outputs.success == 'true'
