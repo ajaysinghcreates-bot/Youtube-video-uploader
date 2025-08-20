@@ -1,0 +1,456 @@
+name: Instagram Reels to YouTube Shorts  v2 (Advanced SEO)
+
+on:
+  schedule:
+    # Run daily at 9 AM UTC
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+    inputs:
+      instagram_url:
+        description: 'Instagram Reel URL (optional - for manual trigger)'
+        required: false
+        type: string
+
+env:
+  YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+  YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+  YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+jobs:
+  process-reels:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install yt-dlp google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client openai requests beautifulsoup4 opencv-python pillow numpy scipy scikit-learn nltk textblob pytrends
+        # Update yt-dlp to latest version for better Instagram support
+        pip install --upgrade yt-dlp
+        # Install ffmpeg for video analysis
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg
+
+    - name: Download Instagram Reel
+      id: download
+      run: |
+        python - <<EOF
+        import yt_dlp
+        import json
+        import os
+        import sys
+        import re
+        from urllib.parse import urlparse
+
+        def sanitize_filename(filename):
+            return re.sub(r'[<>:"/\\|?*]', '', filename)[:100]
+
+        def download_reel(url):
+            ydl_opts = {
+                'format': 'best[height<=1920]/best',
+                'outtmpl': 'downloads/%(id)s.%(ext)s',
+                'writeinfojson': True,
+                'writesubtitles': True,  # Try to get captions if available
+                'writeautomaticsub': True,  # Get auto-generated captions
+                'subtitleslangs': ['en'],
+                'no_warnings': False,
+                'extract_flat': False,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            }
+            
+            os.makedirs('downloads', exist_ok=True)
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                try:
+                    info = ydl.extract_info(url, download=False)
+                    print(f"Available formats for {info.get('id', 'unknown')}:")
+                    formats = info.get('formats', [])
+                    for f in formats[-5:]:
+                        print(f"  {f.get('format_id', 'N/A')}: {f.get('resolution', 'N/A')} - {f.get('ext', 'N/A')}")
+                    
+                    ydl_opts['format'] = 'best'
+                    
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl2:
+                        info = ydl2.extract_info(url, download=True)
+                    
+                    # Enhanced metadata extraction - remove Instagram-specific references
+                    raw_title = info.get('title', 'Amazing Content')
+                    raw_description = info.get('description', '')
+                    
+                    # Clean title and description from platform-specific terms
+                    cleaned_title = re.sub(r'\b(instagram|insta|reel|reels|ig)\b', '', raw_title, flags=re.IGNORECASE).strip()
+                    cleaned_description = re.sub(r'\b(instagram|insta|reel|reels|ig|follow me on instagram)\b', '', raw_description, flags=re.IGNORECASE).strip()
+                    
+                    metadata = {
+                        'original_title': raw_title,
+                        'original_description': raw_description,
+                        'cleaned_title': cleaned_title if cleaned_title else 'Amazing Content',
+                        'cleaned_description': cleaned_description,
+                        'uploader': info.get('uploader', info.get('channel', 'Creator')),
+                        'duration': info.get('duration', 0),
+                        'view_count': info.get('view_count', 0),
+                        'like_count': info.get('like_count', 0),
+                        'upload_date': info.get('upload_date', ''),
+                        'tags': [tag for tag in info.get('tags', []) if 'instagram' not in tag.lower() and 'insta' not in tag.lower()],
+                        'id': info.get('id', ''),
+                        'webpage_url': info.get('webpage_url', url),
+                        'categories': info.get('categories', []),
+                        'age_limit': info.get('age_limit', 0)
+                    }
+                    
+                    with open('downloads/metadata.json', 'w') as f:
+                        json.dump(metadata, f, indent=2)
+                    
+                    video_files = [f for f in os.listdir('downloads') if f.endswith(('.mp4', '.mkv', '.webm', '.mov'))]
+                    if video_files:
+                        video_file = video_files[0]
+                        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                            f.write(f"video_file=downloads/{video_file}\n")
+                            f.write(f"success=true\n")
+                        print(f"✅ Downloaded: {video_file}")
+                        return True
+                    else:
+                        print("❌ No video file found after download")
+                        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                            f.write(f"success=false\n")
+                        return False
+                    
+                except Exception as e:
+                    print(f"Error downloading video: {e}")
+                    with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                        f.write(f"success=false\n")
+                    return False
+
+        instagram_url = "${{ github.event.inputs.instagram_url }}"
+        
+        if not instagram_url:
+            print("No Instagram URL provided")
+            sys.exit(0)
+        
+        print(f"Processing Instagram URL: {instagram_url}")
+        success = download_reel(instagram_url)
+        if not success:
+            sys.exit(1)
+        EOF
+
+    - name: Analyze Video Content
+      id: analyze_content
+      if: steps.download.outputs.success == 'true'
+      run: |
+        python - <<EOF
+        import cv2
+        import json
+        import os
+        import numpy as np
+        from collections import Counter
+        import subprocess
+        import re
+        import glob
+
+        def extract_frames_and_analyze(video_path):
+            """Extract key frames and analyze visual content"""
+            cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                print(f"Error opening video: {video_path}")
+                return {}
+            
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps = int(cap.get(cv2.CAP_PROP_FPS))
+            duration = frame_count / fps if fps > 0 else 0
+            
+            # Sample frames at different intervals
+            sample_frames = [0, frame_count//4, frame_count//2, 3*frame_count//4, frame_count-1]
+            
+            brightness_values = []
+            color_analysis = {'dominant_colors': [], 'color_variance': 0}
+            motion_analysis = {'scene_changes': 0, 'average_motion': 0}
+            
+            prev_frame = None
+            scene_changes = 0
+            
+            for frame_idx in sample_frames:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                
+                # Brightness analysis
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                brightness = np.mean(gray)
+                brightness_values.append(brightness)
+                
+                # Motion detection (scene change)
+                if prev_frame is not None:
+                    diff = cv2.absdiff(prev_frame, gray)
+                    motion_score = np.mean(diff)
+                    if motion_score > 30:  # Threshold for scene change
+                        scene_changes += 1
+                
+                prev_frame = gray
+                
+                # Color analysis
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                pixels = frame_rgb.reshape(-1, 3)
+                
+                # Simple dominant color detection
+                from sklearn.cluster import KMeans
+                try:
+                    kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+                    kmeans.fit(pixels)
+                    colors = kmeans.cluster_centers_.astype(int)
+                    color_analysis['dominant_colors'].extend(colors.tolist())
+                except:
+                    pass
+            
+            cap.release()
+            
+            # Determine video characteristics
+            avg_brightness = np.mean(brightness_values) if brightness_values else 128
+            brightness_category = "bright" if avg_brightness > 150 else "dark" if avg_brightness < 80 else "normal"
+            
+            motion_category = "high-action" if scene_changes > 2 else "low-action"
+            
+            return {
+                'duration': duration,
+                'fps': fps,
+                'brightness_category': brightness_category,
+                'motion_category': motion_category,
+                'scene_changes': scene_changes,
+                'frame_count': frame_count
+            }
+
+        def extract_audio_features(video_path):
+            """Extract audio and analyze for content type"""
+            try:
+                # Extract audio using ffmpeg
+                audio_path = 'downloads/temp_audio.wav'
+                cmd = [
+                    'ffmpeg', '-i', video_path, '-vn', '-acodec', 'pcm_s16le', 
+                    '-ar', '44100', '-ac', '2', audio_path, '-y'
+                ]
+                subprocess.run(cmd, capture_output=True, check=True)
+                
+                # Analyze audio properties
+                cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', audio_path]
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    audio_info = json.loads(result.stdout)
+                    # Basic audio analysis
+                    has_audio = len(audio_info.get('streams', [])) > 0
+                    
+                    # Clean up
+                    if os.path.exists(audio_path):
+                        os.remove(audio_path)
+                    
+                    return {'has_audio': has_audio, 'audio_quality': 'good' if has_audio else 'none'}
+                
+                return {'has_audio': False, 'audio_quality': 'none'}
+                
+            except Exception as e:
+                print(f"Audio analysis error: {e}")
+                return {'has_audio': False, 'audio_quality': 'unknown'}
+
+        def analyze_text_content(metadata):
+            """Analyze text content for themes and topics"""
+            from textblob import TextBlob
+            
+            text_content = f"{metadata.get('cleaned_title', '')} {metadata.get('cleaned_description', '')}"
+            
+            if not text_content.strip():
+                return {'sentiment': 'neutral', 'keywords': [], 'topics': []}
+            
+            # Sentiment analysis
+            blob = TextBlob(text_content)
+            sentiment_score = blob.sentiment.polarity
+            sentiment = 'positive' if sentiment_score > 0.1 else 'negative' if sentiment_score < -0.1 else 'neutral'
+            
+            # Extract keywords (simple approach)
+            words = re.findall(r'\b\w+\b', text_content.lower())
+            # Filter out common words
+            common_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'should', 'could', 'can', 'may', 'might', 'this', 'that', 'these', 'those'}
+            keywords = [word for word in words if len(word) > 3 and word not in common_words]
+            keyword_freq = Counter(keywords)
+            
+            return {
+                'sentiment': sentiment,
+                'keywords': [word for word, count in keyword_freq.most_common(10)],
+                'word_count': len(words),
+                'key_phrases': list(keyword_freq.keys())[:5]
+            }
+
+        # Find video file
+        video_files = glob.glob('downloads/*.mp4') + glob.glob('downloads/*.mkv') + glob.glob('downloads/*.webm')
+        if not video_files:
+            print("No video file found for analysis")
+            exit(1)
+        
+        video_file = video_files[0]
+        
+        # Load metadata
+        with open('downloads/metadata.json', 'r') as f:
+            metadata = json.load(f)
+        
+        print("Analyzing video content...")
+        
+        # Perform analyses
+        visual_analysis = extract_frames_and_analyze(video_file)
+        audio_analysis = extract_audio_features(video_file)
+        text_analysis = analyze_text_content(metadata)
+        
+        # Combine all analysis results
+        content_analysis = {
+            'visual': visual_analysis,
+            'audio': audio_analysis,
+            'text': text_analysis,
+            'video_file': video_file,
+            'analysis_timestamp': str(int(os.path.getmtime(video_file)))
+        }
+        
+        # Save analysis results
+        with open('downloads/content_analysis.json', 'w') as f:
+            json.dump(content_analysis, f, indent=2)
+        
+        print("✅ Content analysis completed")
+        print(f"Duration: {visual_analysis.get('duration', 0):.1f}s")
+        print(f"Motion: {visual_analysis.get('motion_category', 'unknown')}")
+        print(f"Brightness: {visual_analysis.get('brightness_category', 'unknown')}")
+        print(f"Sentiment: {text_analysis.get('sentiment', 'neutral')}")
+        EOF
+
+    - name: Generate Advanced SEO Content
+      id: advanced_seo
+      if: steps.download.outputs.success == 'true'
+      run: |
+        python - <<EOF
+        import json
+        import openai
+        import os
+        import re
+        from pytrends.request import TrendReq
+        import time
+        import random
+
+        def get_trending_keywords():
+            """Get trending keywords related to video content"""
+            try:
+                pytrends = TrendReq(hl='en-US', tz=360)
+                
+                # Get trending searches
+                trending_searches = pytrends.trending_searches(pn='united_states')
+                trends = trending_searches[0].head(20).tolist()
+                
+                return trends
+            except Exception as e:
+                print(f"Error fetching trends: {e}")
+                # Fallback trending topics for 2025
+                return [
+                    "viral moment", "trending now", "amazing", "incredible", "must watch",
+                    "epic", "satisfying", "mind blowing", "unexpected", "wholesome",
+                    "creative", "talent", "skills", "life hack", "transformation"
+                ]
+
+        def categorize_content(visual_analysis, audio_analysis, text_analysis, metadata):
+            """Intelligently categorize content for optimal SEO"""
+            
+            duration = visual_analysis.get('duration', 0)
+            motion = visual_analysis.get('motion_category', 'normal')
+            brightness = visual_analysis.get('brightness_category', 'normal')
+            sentiment = text_analysis.get('sentiment', 'neutral')
+            keywords = text_analysis.get('keywords', [])
+            has_audio = audio_analysis.get('has_audio', False)
+            
+            # Determine primary content category
+            categories = []
+            
+            # Duration-based categorization
+            if duration < 15:
+                categories.append("quick")
+            elif duration > 45:
+                categories.append("detailed")
+            
+            # Motion-based categorization
+            if motion == "high-action":
+                categories.extend(["action", "dynamic", "energetic"])
+            else:
+                categories.extend(["calm", "peaceful", "relaxing"])
+            
+            # Visual-based categorization
+            if brightness == "bright":
+                categories.extend(["vibrant", "colorful"])
+            elif brightness == "dark":
+                categories.extend(["dramatic", "moody"])
+            
+            # Sentiment-based categorization
+            if sentiment == "positive":
+                categories.extend(["uplifting", "positive", "inspiring"])
+            elif sentiment == "negative":
+                categories.extend(["dramatic", "intense"])
+            else:
+                categories.extend(["informative", "educational"])
+            
+            # Audio-based categorization
+            if has_audio:
+                categories.extend(["music", "audio", "sound"])
+            else:
+                categories.extend(["visual", "silent"])
+            
+            # Keyword-based categorization
+            for keyword in keywords[:5]:
+                if any(word in keyword.lower() for word in ['dance', 'music', 'song']):
+                    categories.extend(["entertainment", "music", "dance"])
+                elif any(word in keyword.lower() for word in ['food', 'recipe', 'cooking']):
+                    categories.extend(["food", "cooking", "recipe"])
+                elif any(word in keyword.lower() for word in ['fitness', 'workout', 'exercise']):
+                    categories.extend(["fitness", "health", "workout"])
+                elif any(word in keyword.lower() for word in ['art', 'creative', 'design']):
+                    categories.extend(["art", "creative", "design"])
+                elif any(word in keyword.lower() for word in ['funny', 'comedy', 'humor']):
+                    categories.extend(["comedy", "funny", "humor"])
+                elif any(word in keyword.lower() for word in ['travel', 'adventure', 'explore']):
+                    categories.extend(["travel", "adventure", "explore"])
+                elif any(word in keyword.lower() for word in ['tech', 'gadget', 'review']):
+                    categories.extend(["technology", "review", "gadgets"])
+            
+            return list(set(categories))  # Remove duplicates
+
+        def generate_advanced_seo(metadata, content_analysis, trending_keywords):
+            """Generate highly optimized SEO content based on deep analysis"""
+            
+            visual = content_analysis.get('visual', {})
+            audio = content_analysis.get('audio', {})
+            text = content_analysis.get('text', {})
+            
+            categories = categorize_content(visual, audio, text, metadata)
+            
+            client = openai.OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+            
+            prompt = f"""
+            You are a YouTube Shorts SEO expert. Create highly optimized content for maximum reach and engagement.
+            
+            CONTENT ANALYSIS:
+            - Duration: {visual.get('duration', 0):.1f} seconds
+            - Motion Level: {visual.get('motion_category', 'normal')}
+            - Visual Brightness: {visual.get('brightness_category', 'normal')}
+            - Audio Present: {audio.get('has_audio', False)}
+            - Text Sentiment: {text.get('sentiment', 'neutral')}
+            - Key Topics: {text.get('keywords', [])}
+            - Content Categories: {categories}
+            
+            TRENDING CONTEXT:
+            Current trending terms: {trending_keywords[:10]}
+            
+            REQUIREMENTS:
+            1. TITLE (45-55 characters):
+             
