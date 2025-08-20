@@ -1,133 +1,187 @@
-name: Instagram Reels to YouTube Shorts (SEO Optimized)
+name: Instagram Reels to YouTube Shorts (With SEO & Upload)
 
 on:
   schedule:
-    - cron: '0 9 * * *'   # Run daily at 9 AM UTC
+    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       instagram_url:
-        description: 'Instagram Reel URL (optional for manual run)'
+        description: 'Instagram Reel URL (optional - for manual trigger)'
         required: false
         type: string
 
+env:
+  YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+  YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+  YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
 jobs:
-  process:
+  process-reels:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.12'
+    - name: Setup Python & FFmpeg
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg wget git build-essential
+        python -m pip install --upgrade pip
+        pip install yt-dlp openai google-api-python-client google-auth google-auth-oauthlib google-auth-httplib2 whisper ffmpeg-python
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg git build-essential wget
-          pip install openai youtube-upload yt-dlp
+    - name: Download Instagram Reel
+      id: download
+      run: |
+        python - <<EOF
+import yt_dlp, os, sys, json
 
-      - name: Install Whisper.cpp (free transcription)
-        run: |
-          git clone https://github.com/ggerganov/whisper.cpp
-          cd whisper.cpp
-          make
-          cd ..
-          wget -c https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin -O whisper.cpp/models/ggml-small.bin
+def download_reel(url):
+    os.makedirs("downloads", exist_ok=True)
+    ydl_opts = {
+        "format":"best[height<=1920]/best",
+        "outtmpl":"downloads/%(id)s.%(ext)s",
+        "writeinfojson":True,
+        "http_headers":{"User-Agent":"Mozilla/5.0"}
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        metadata = {
+            "title": info.get("title","Instagram Reel"),
+            "description": info.get("description",""),
+            "uploader": info.get("uploader","Unknown"),
+            "id": info.get("id",""),
+            "webpage_url": info.get("webpage_url", url)
+        }
+        with open("downloads/metadata.json","w") as f:
+            json.dump(metadata,f,indent=2)
+    video_files = [f for f in os.listdir("downloads") if f.endswith((".mp4",".mkv",".webm",".mov"))]
+    if video_files:
+        print(f"video_file=downloads/{video_files[0]}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
+        print("success=true", file=open(os.environ["GITHUB_OUTPUT"], "a"))
+    else:
+        print("success=false", file=open(os.environ["GITHUB_OUTPUT"], "a"))
 
-      - name: Download Instagram Reel
-        run: |
-          URL="${{ github.event.inputs.instagram_url }}"
-          if [ -z "$URL" ]; then
-            echo "⚠️ No Instagram URL provided. Exiting..."
-            exit 1
-          fi
-          yt-dlp -f mp4 -o input.mp4 "$URL"
+instagram_url = "${{ github.event.inputs.instagram_url }}"
+if not instagram_url:
+    print("No Instagram URL provided")
+    sys.exit(0)
 
-      - name: Transcribe audio with Whisper.cpp
-        run: |
-          ffmpeg -i input.mp4 -ar 16000 -ac 1 -f wav input.wav
-          ./whisper.cpp/main -m whisper.cpp/models/ggml-small.bin -f input.wav -of transcript.txt
-          cat transcript.txt
+download_reel(instagram_url)
+EOF
 
-      - name: Generate SEO Title, Description, and Tags
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: |
-          python - <<EOF
-          import openai, json
+    - name: Extract Audio
+      if: steps.download.outputs.success == 'true'
+      run: |
+        ffmpeg -i ${{ steps.download.outputs.video_file }} -vn -acodec pcm_s16le -ar 16000 -ac 1 downloads/audio.wav
 
-          with open("transcript.txt") as f:
-              transcript = f.read()
+    - name: Transcribe Audio
+      if: steps.download.outputs.success == 'true'
+      run: |
+        python - <<EOF
+import whisper, json
+model = whisper.load_model("base")
+result = model.transcribe("downloads/audio.wav")
+with open("downloads/transcript.json","w",encoding="utf-8") as f:
+    json.dump(result,f,ensure_ascii=False,indent=2)
+EOF
 
-          prompt = f"""
-          You are an expert YouTube Shorts SEO assistant.
-          Based on this transcript, generate:
-          1. A catchy title (mix Hindi + English, add emojis, end with #shorts).
-          2. A 200+ word engaging description (mix Hindi-English, natural, storytelling style).
-          3. 30 viral tags (comma separated, short form, related to video content).
+    - name: Generate YouTube SEO (Title, Description, Tags)
+      if: steps.download.outputs.success == 'true'
+      run: |
+        python - <<EOF
+import json, os, re, openai
+with open("downloads/transcript.json","r",encoding="utf-8") as f:
+    transcript = json.load(f)
+full_text = transcript.get("text","")
 
-          Transcript: {transcript}
-          """
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-          response = openai.ChatCompletion.create(
-              model="gpt-4o-mini",
-              messages=[{"role":"user","content":prompt}]
-          )
+prompt = f"""
+Generate a catchy YouTube Shorts metadata for this transcript.
+Mix Hindi & English, include emojis in title, and add #shorts.
+Transcript:
+{full_text}
+Return JSON only:
+{{"title":"short title","description":"200-300 word engaging description with hashtags","tags":["tag1","tag2"]}}
+"""
 
-          result = response.choices[0].message["content"]
-          print("Generated SEO:", result)
+response = openai.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role":"user","content":prompt}],
+    max_tokens=1200,
+    temperature=0.7
+)
 
-          with open("seo.json","w") as f:
-              json.dump(result, f)
-          EOF
+content = response.choices[0].message.content
+match = re.search(r"\{.*\}", content, re.DOTALL)
+seo_json = {}
+if match:
+    try:
+        seo_json = json.loads(match.group())
+    except:
+        seo_json = {"title":"Fallback Title","description":"Fallback Description","tags":["shorts"]}
+else:
+    seo_json = {"title":"Fallback Title","description":"Fallback Description","tags":["shorts"]}
 
-      - name: Upload video to YouTube
-        env:
-          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
-          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-        run: |
-          python - <<EOF
-          import json, subprocess, re
+with open("downloads/seo_content.json","w",encoding="utf-8") as f:
+    json.dump(seo_json,f,indent=2)
+EOF
 
-          with open("seo.json") as f:
-              seo = f.read()
+    - name: Upload to YouTube
+      if: steps.download.outputs.success == 'true'
+      run: |
+        python - <<EOF
+import os, glob, json
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 
-          # Naive parsing (you can improve regex if needed)
-          title = "🔥 Funny Hindi-English Shorts 😂 #shorts"
-          description = seo
-          tags = "funny,shorts,hindi,english,viral"
+with open("downloads/seo_content.json","r") as f:
+    seo = json.load(f)
 
-          cmd = [
-              "youtube-upload",
-              "--title", title,
-              "--description", description,
-              "--tags", tags,
-              "--client-id=${{ secrets.YOUTUBE_CLIENT_ID }}",
-              "--client-secret=${{ secrets.YOUTUBE_CLIENT_SECRET }}",
-              "--credentials-file=credentials.json",
-              "input.mp4"
-          ]
+title = seo.get("title","🔥 Shorts Video #shorts")
+description = seo.get("description","Watch now! #shorts")
+tags = seo.get("tags",["shorts"])
 
-          print("Uploading video...")
-          result = subprocess.run(" ".join(cmd), shell=True, capture_output=True, text=True)
-          print("Uploader output:", result.stdout, result.stderr)
+creds = Credentials(
+    token=None,
+    refresh_token=os.environ['YOUTUBE_REFRESH_TOKEN'],
+    client_id=os.environ['YOUTUBE_CLIENT_ID'],
+    client_secret=os.environ['YOUTUBE_CLIENT_SECRET'],
+    token_uri="https://oauth2.googleapis.com/token"
+)
 
-          match = re.search(r"video id (.+)", result.stdout + result.stderr, re.I)
-          if match:
-              video_id = match.group(1).strip()
-              video_url = f"https://www.youtube.com/watch?v={video_id}"
-              print("✅ Video uploaded successfully:", video_url)
-              with open("video_link.txt","w") as f:
-                  f.write(video_url)
-          else:
-              print("⚠️ Could not extract video ID. Check logs.")
-          EOF
+youtube = build("youtube","v3",credentials=creds)
 
-      - name: Share video link
-        run: |
-          echo "YouTube Shorts Link:"
-          cat video_link.txt
+video_files = glob.glob("downloads/*.*")
+video_file = None
+for f in video_files:
+    if f.endswith((".mp4",".mkv",".webm")):
+        video_file = f
+        break
+
+if not video_file:
+    raise Exception("No video file found")
+
+request = youtube.videos().insert(
+    part="snippet,status",
+    body={
+        "snippet": {"title":title,"description":description,"tags":tags,"categoryId":"24","defaultLanguage":"en"},
+        "status": {"privacyStatus":"public","selfDeclaredMadeForKids":False}
+    },
+    media_body=MediaFileUpload(video_file)
+)
+
+response = request.execute()
+video_url = f"https://www.youtube.com/watch?v={response['id']}"
+print("✅ Uploaded! Video URL:",video_url)
+
+with open("downloads/video_link.txt","w") as f:
+    f.write(video_url)
+EOF
+
+    - name: Cleanup
+      if: always()
+      run: rm -rf downloads/
