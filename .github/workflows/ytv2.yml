@@ -1,4 +1,4 @@
-name: Instagram Reels to YouTube Shorts (Fixed & Clean)
+name: Instagram Reels to YouTube Shorts (Vosk + Custom Title)
 
 on:
   workflow_dispatch:
@@ -6,6 +6,10 @@ on:
       instagram_url:
         description: 'Instagram Reel URL'
         required: true
+        type: string
+      custom_title:
+        description: 'Optional custom YouTube Shorts title'
+        required: false
         type: string
 
 env:
@@ -25,9 +29,9 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg
+        sudo apt-get install -y ffmpeg unzip
         python3 -m pip install --upgrade pip
-        pip install yt-dlp openai google-api-python-client google-auth google-auth-oauthlib google-auth-httplib2 whisper ffmpeg-python
+        pip install yt-dlp openai google-api-python-client google-auth google-auth-oauthlib google-auth-httplib2 ffmpeg-python vosk
 
     - name: Download Instagram Reel
       id: download
@@ -39,31 +43,31 @@ jobs:
         os.makedirs('downloads', exist_ok=True)
 
         ydl_opts = {
-            'format': 'best[height<=1920]/best',
-            'outtmpl': 'downloads/%(id)s.%(ext)s',
-            'writeinfojson': True,
-            'http_headers': {'User-Agent': 'Mozilla/5.0'}
+          'format': 'best[height<=1920]/best',
+          'outtmpl': 'downloads/%(id)s.%(ext)s',
+          'writeinfojson': True,
+          'http_headers': {'User-Agent': 'Mozilla/5.0'}
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+          info = ydl.extract_info(url, download=True)
 
         video_file = None
         for ext in ['.mp4', '.mkv', '.webm']:
-            for f in os.listdir('downloads'):
-                if f.endswith(ext):
-                    video_file = f
-                    break
-            if video_file:
-                break
+          for f in os.listdir('downloads'):
+            if f.endswith(ext):
+              video_file = f
+              break
+          if video_file:
+            break
 
         if not video_file:
-            raise Exception('Video download failed.')
+          raise Exception('Video download failed.')
 
         video_path = f'downloads/{video_file}'
         with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
-            fh.write(f'video_file={video_path}\n')
-            fh.write('success=true\n')
+          fh.write(f'video_file={video_path}\n')
+          fh.write('success=true\n')
         EOF
 
     - name: Extract audio
@@ -71,15 +75,38 @@ jobs:
       run: |
         ffmpeg -y -i "${{ steps.download.outputs.video_file }}" -vn -acodec pcm_s16le -ar 16000 -ac 1 downloads/audio.wav
 
-    - name: Transcribe audio
+    - name: Transcribe audio with Vosk
       if: steps.download.outputs.success == 'true'
       run: |
+        curl -L -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+        unzip -q model.zip -d .
+        mv vosk-model-small-en-us-0.15 model
+
         cat <<EOF | python3
-        import whisper, json
-        model = whisper.load_model('base')
-        result = model.transcribe('downloads/audio.wav')
-        with open('downloads/transcript.json', 'w', encoding='utf-8') as f:
-            json.dump(result, f, ensure_ascii=False, indent=2)
+        import wave
+        import json
+        from vosk import Model, KaldiRecognizer
+
+        wf = wave.open("downloads/audio.wav", "rb")
+        if wf.getnchannels() != 1 or wf.getsampwidth() != 2 or wf.getframerate() not in [8000, 16000, 44100]:
+            raise ValueError("Audio file must be WAV mono PCM with a supported sample rate.")
+
+        model = Model("model")
+        rec = KaldiRecognizer(model, wf.getframerate())
+        rec.SetWords(True)
+
+        result_text = ""
+        while True:
+            data = wf.readframes(4000)
+            if len(data) == 0:
+                break
+            if rec.AcceptWaveform(data):
+                res = json.loads(rec.Result())
+                result_text += res.get("text", "") + " "
+
+        final_result = {"text": result_text.strip()}
+        with open("downloads/transcript.json", "w", encoding="utf-8") as f:
+            json.dump(final_result, f, ensure_ascii=False, indent=2)
         EOF
 
     - name: Generate YouTube metadata
@@ -90,37 +117,63 @@ jobs:
 
         openai.api_key = os.getenv('OPENAI_API_KEY')
 
-        with open('downloads/transcript.json', 'r') as f:
+        custom_title = '${{ github.event.inputs.custom_title }}'.strip()
+
+        # Load transcript and Instagram metadata
+        with open('downloads/transcript.json', 'r', encoding='utf-8') as f:
             transcript = json.load(f)
 
         text = transcript.get('text', '')
 
-        prompt = f'''
-        Create a catchy YouTube Shorts title (with emojis & #shorts), description (200-300 words), and 10-15 tags.
-        Mix Hindi & English. Use the transcript for context.
-        Return JSON only:
-        {{"title":"...","description":"...","tags":["tag1"]}}
-        Transcript: {text}
-        '''
+        seo = {
+            "title": "🔥 Shorts Video #shorts",
+            "description": "Watch now!",
+            "tags": ["shorts"]
+        }
+
+        if custom_title:
+            # Use custom title to generate description and tags
+            prompt = f"""
+            You are a YouTube Shorts SEO expert. Using this title: '{custom_title}'
+            Generate a catchy description (under 5000 words, include keywords & hashtags)
+            and 20 SEO-friendly tags for YouTube Shorts.
+            Return JSON only like:
+            {{ "title": "...", "description": "...", "tags": ["tag1","tag2",...]}}
+
+            Transcript for context: {text}
+            """
+        else:
+            # Generate full SEO metadata automatically
+            prompt = f"""
+            You are a YouTube Shorts SEO expert.
+            Using the transcript: {text}
+            Generate a catchy title (with emojis & #shorts, under 100 chars),
+            a description (under 5000 words with keywords and hashtags),
+            and 20 SEO-friendly tags for YouTube Shorts.
+            Return JSON only like:
+            {{ "title": "...", "description": "...", "tags": ["tag1","tag2",...]}}
+            """
 
         response = openai.chat.completions.create(
             model='gpt-4o-mini',
-            messages=[{'role': 'user', 'content': prompt}],
+            messages=[
+                {"role":"system", "content": "You are a YouTube Shorts SEO expert. Generate clickable titles, descriptions, and tags."},
+                {"role":"user", "content": prompt}
+            ],
             temperature=0.7,
-            max_tokens=1200
+            max_tokens=1500
         )
 
         content = response.choices[0].message.content
         match = re.search(r'\{.*\}', content, re.DOTALL)
 
-        seo = {'title': '🔥 Shorts Video #shorts', 'description': 'Watch now!', 'tags': ['shorts']}
         if match:
             try:
                 seo = json.loads(match.group())
             except:
                 pass
 
-        with open('downloads/seo_content.json', 'w') as f:
+        with open('downloads/seo_content.json', 'w', encoding='utf-8') as f:
             json.dump(seo, f, indent=2)
         EOF
 
@@ -182,4 +235,4 @@ jobs:
 
     - name: Cleanup
       if: always()
-      run: rm -rf downloads/
+      run: rm -rf downloads/ model/ model.zip
