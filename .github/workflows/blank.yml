@@ -1,230 +1,161 @@
-name: Instagram Reels to YouTube Shorts (Vosk + SEO)
+name: Instagram Reels to YouTube Shorts (with Custom Metadata)
 
 on:
   workflow_dispatch:
     inputs:
       instagram_url:
-        description: 'Instagram Reel URL'
-        required: true
+        description: 'Instagram Reel URL (optional - for manual trigger)'
+        required: false
+        type: string
+      custom_title:
+        description: 'Custom YouTube title (optional)'
+        required: false
+        type: string
+      custom_description:
+        description: 'Custom YouTube description (optional)'
+        required: false
+        type: string
+      custom_tags:
+        description: 'Custom YouTube tags (comma separated, optional)'
+        required: false
         type: string
 
-env:
-  YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
-  YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-  YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  schedule:
+    - cron: '0 9 * * *'   # Run daily at 9 AM UTC
 
 jobs:
-  upload-short:
+  upload:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y ffmpeg unzip
-        python3 -m pip install --upgrade pip
-        pip install yt-dlp openai google-api-python-client google-auth google-auth-oauthlib google-auth-httplib2 ffmpeg-python vosk
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
-    - name: Download Instagram Reel
-      id: download
-      run: |
-        cat <<EOF | python3
-        import yt_dlp, os, json
+      - name: Install dependencies
+        run: |
+          pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client openai
 
-        url = '${{ github.event.inputs.instagram_url }}'
-        os.makedirs('downloads', exist_ok=True)
+      - name: Download Reel (if instagram_url provided)
+        if: ${{ github.event.inputs.instagram_url != '' }}
+        run: |
+          mkdir -p downloads
+          yt-dlp -o "downloads/video.mp4" "${{ github.event.inputs.instagram_url }}"
 
-        ydl_opts = {
-          'format': 'best[height<=1920]/best',
-          'outtmpl': 'downloads/%(id)s.%(ext)s',
-          'writeinfojson': True,
-          'http_headers': {'User-Agent': 'Mozilla/5.0'}
-        }
+      - name: Ensure video exists
+        run: |
+          if [ ! -f downloads/video.mp4 ]; then
+            echo "⚠️ No video found in downloads/video.mp4"
+            exit 1
+          fi
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+      - name: Upload to YouTube
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CUSTOM_TITLE: ${{ github.event.inputs.custom_title }}
+          CUSTOM_DESCRIPTION: ${{ github.event.inputs.custom_description }}
+          CUSTOM_TAGS: ${{ github.event.inputs.custom_tags }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+        run: |
+          cat << 'EOF' > upload.py
+          import os
+          import pickle
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+          from google_auth_oauthlib.flow import InstalledAppFlow
+          from google.auth.transport.requests import Request
+          from openai import OpenAI
 
-        # Save metadata
-        metadata_path = 'downloads/metadata.json'
-        with open(metadata_path, 'w', encoding='utf-8') as f:
-            json.dump(info, f, ensure_ascii=False, indent=2)
+          SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
 
-        # Get the video file
-        video_file = None
-        for ext in ['.mp4', '.mkv', '.webm']:
-            for f in os.listdir('downloads'):
-                if f.endswith(ext):
-                    video_file = f
-                    break
-            if video_file:
-                break
+          def authenticate_youtube():
+              creds = None
+              if os.path.exists("token.pickle"):
+                  with open("token.pickle", "rb") as token:
+                      creds = pickle.load(token)
+              if not creds or not creds.valid:
+                  if creds and creds.expired and creds.refresh_token:
+                      creds.refresh(Request())
+                  else:
+                      with open("client_secrets.json", "w") as f:
+                          f.write(os.getenv("YOUTUBE_CLIENT_SECRET"))
+                      flow = InstalledAppFlow.from_client_secrets_file("client_secrets.json", SCOPES)
+                      creds = flow.run_console()
+                  with open("token.pickle", "wb") as token:
+                      pickle.dump(creds, token)
+              return build("youtube", "v3", credentials=creds)
 
-        if not video_file:
-            raise Exception('Video download failed.')
+          def generate_metadata(video_path, custom_title=None, custom_description=None, custom_tags=None):
+              client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-        video_path = f'downloads/{video_file}'
-        with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
-            fh.write(f'video_file={video_path}\n')
-            fh.write('success=true\n')
-        EOF
+              if custom_title and (custom_description or custom_tags):
+                  return {
+                      "title": custom_title,
+                      "description": custom_description if custom_description else "",
+                      "tags": custom_tags if custom_tags else []
+                  }
 
-    - name: Extract audio
-      if: steps.download.outputs.success == 'true'
-      run: |
-        ffmpeg -y -i "${{ steps.download.outputs.video_file }}" -vn -acodec pcm_s16le -ar 16000 -ac 1 downloads/audio.wav
+              if custom_title and not (custom_description or custom_tags):
+                  return {
+                      "title": custom_title,
+                      "description": "",
+                      "tags": []
+                  }
 
-    - name: Transcribe audio with Vosk
-      if: steps.download.outputs.success == 'true'
-      run: |
-        curl -L -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
-        unzip -q model.zip -d .
-        mv vosk-model-small-en-us-0.15 model
+              # Auto-generate
+              prompt = f"""
+              Generate SEO metadata for a YouTube Shorts video:
+              - Hinglish/Hindi Title under 100 chars with #shorts
+              - Engaging Description under 5000 words
+              - 20 SEO Tags (comma separated)
+              """
 
-        cat <<EOF | python3
-        import wave, json
-        from vosk import Model, KaldiRecognizer
+              response = client.chat.completions.create(
+                  model="gpt-4o-mini",
+                  messages=[{"role": "user", "content": prompt}]
+              )
 
-        wf = wave.open("downloads/audio.wav", "rb")
-        if wf.getnchannels() != 1 or wf.getsampwidth() != 2:
-            raise ValueError("Audio must be mono PCM.")
+              text = response.choices[0].message.content
+              lines = text.splitlines()
+              title = next((l for l in lines if "Title:" in l), "My YouTube Shorts #shorts").replace("Title:", "").strip()
+              description = next((l for l in lines if "Description:" in l), "Amazing YouTube Shorts video! #shorts").replace("Description:", "").strip()
+              tags_line = next((l for l in lines if "Tags:" in l), "funny,shorts,viral,india")
+              tags = [t.strip() for t in tags_line.replace("Tags:", "").split(",")]
 
-        model = Model("model")
-        rec = KaldiRecognizer(model, wf.getframerate())
-        rec.SetWords(True)
+              return {"title": title, "description": description, "tags": tags}
 
-        result_text = ""
-        while True:
-            data = wf.readframes(4000)
-            if len(data) == 0:
-                break
-            if rec.AcceptWaveform(data):
-                res = json.loads(rec.Result())
-                result_text += res.get("text", "") + " "
+          def upload_video(youtube, video_path, metadata):
+              request = youtube.videos().insert(
+                  part="snippet,status",
+                  body={
+                      "snippet": {
+                          "title": metadata["title"],
+                          "description": metadata["description"],
+                          "tags": metadata["tags"]
+                      },
+                      "status": {"privacyStatus": "public"}
+                  },
+                  media_body=MediaFileUpload(video_path)
+              )
+              response = request.execute()
+              print("✅ Uploaded:", f"https://www.youtube.com/watch?v={response['id']}")
 
-        final_result = {"text": result_text.strip()}
-        with open("downloads/transcript.json", "w", encoding="utf-8") as f:
-            json.dump(final_result, f, ensure_ascii=False, indent=2)
-        EOF
+          if __name__ == "__main__":
+              youtube = authenticate_youtube()
+              video_path = "downloads/video.mp4"
 
-    - name: Generate YouTube Shorts metadata
-      if: steps.download.outputs.success == 'true'
-      run: |
-        cat <<EOF | python3
-        import os, json, re, openai
+              custom_title = os.getenv("CUSTOM_TITLE", None)
+              custom_description = os.getenv("CUSTOM_DESCRIPTION", None)
+              custom_tags = os.getenv("CUSTOM_TAGS", None)
+              if custom_tags:
+                  custom_tags = [t.strip() for t in custom_tags.split(",")]
 
-        openai.api_key = os.getenv('OPENAI_API_KEY')
+              metadata = generate_metadata(video_path, custom_title, custom_description, custom_tags)
+              upload_video(youtube, video_path, metadata)
+          EOF
 
-        # Load transcript and Instagram metadata
-        with open('downloads/transcript.json', 'r', encoding='utf-8') as f:
-            transcript = json.load(f)
-
-        with open('downloads/metadata.json', 'r', encoding='utf-8') as f:
-            metadata = json.load(f)
-
-        text = transcript.get('text', '')
-        insta_title = metadata.get('title', '')
-
-        prompt = f"""
-        You are a YouTube Shorts SEO expert.
-        Using the Instagram title: '{insta_title}' and the transcript: '{text}', generate:
-
-        - A catchy YouTube Shorts title under 100 chars (use emojis + #shorts, mix Hindi & English)
-        - A description under 5000 words with keywords + hashtags
-        - 20 SEO-friendly tags
-
-        Return JSON only:
-        {{
-          "title":"...",
-          "description":"...",
-          "tags":["tag1","tag2",...]
-        }}
-        """
-
-        response = openai.chat.completions.create(
-            model='gpt-4o-mini',
-            messages=[{'role':'user','content':prompt}],
-            temperature=0.7,
-            max_tokens=1200
-        )
-
-        content = response.choices[0].message.content
-        match = re.search(r'\{.*\}', content, re.DOTALL)
-
-        seo = {
-            "title": "🔥 Shorts Video #shorts",
-            "description": "Watch now!",
-            "tags": ["shorts"]
-        }
-        if match:
-            try:
-                seo = json.loads(match.group())
-            except:
-                pass
-
-        with open('downloads/seo_content.json', 'w', encoding='utf-8') as f:
-            json.dump(seo, f, indent=2)
-        EOF
-
-    - name: Upload to YouTube
-      if: steps.download.outputs.success == 'true'
-      run: |
-        cat <<EOF | python3
-        import os, json
-        from glob import glob
-        from mimetypes import guess_type
-        from google.oauth2.credentials import Credentials
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaFileUpload
-
-        with open('downloads/seo_content.json', 'r') as f:
-            seo = json.load(f)
-
-        video_files = [f for f in glob('downloads/*') if f.endswith(('.mp4','.mkv','.webm'))]
-        if not video_files:
-            raise Exception('No video found')
-        video_file = video_files[0]
-
-        mime_type = guess_type(video_file)[0] or 'video/mp4'
-
-        creds = Credentials(
-            token=None,
-            refresh_token=os.environ['YOUTUBE_REFRESH_TOKEN'],
-            client_id=os.environ['YOUTUBE_CLIENT_ID'],
-            client_secret=os.environ['YOUTUBE_CLIENT_SECRET'],
-            token_uri='https://oauth2.googleapis.com/token'
-        )
-
-        youtube = build('youtube', 'v3', credentials=creds)
-
-        request = youtube.videos().insert(
-            part='snippet,status',
-            body={
-                'snippet': {
-                    'title': seo.get('title'),
-                    'description': seo.get('description'),
-                    'tags': seo.get('tags'),
-                    'categoryId':'24'
-                },
-                'status': {
-                    'privacyStatus':'public',
-                    'selfDeclaredMadeForKids': False
-                }
-            },
-            media_body=MediaFileUpload(video_file, mimetype=mime_type)
-        )
-
-        response = request.execute()
-        link = f"https://www.youtube.com/watch?v={response['id']}"
-        print('✅ Uploaded Video Link:', link)
-
-        with open('downloads/video_link.txt', 'w') as f:
-            f.write(link)
-        EOF
-
-    - name: Cleanup
-      if: always()
-      run: rm -rf downloads/ model/ model.zip
+          python3 upload.py
