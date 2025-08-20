@@ -46,7 +46,8 @@ jobs:
     - name: Install Python dependencies
       run: |
         pip install --upgrade pip
-        pip install yt-dlp==2023.12.30
+        # Install latest yt-dlp for better Instagram support
+        pip install --upgrade yt-dlp
         pip install google-auth==2.23.4
         pip install google-auth-oauthlib==1.1.0
         pip install google-auth-httplib2==0.1.1
@@ -61,6 +62,7 @@ jobs:
         pip install nltk==3.8.1
         pip install textblob==0.17.1
         pip install pytrends==4.9.2
+        pip install instaloader==4.10.3
 
     - name: Download Instagram Reel
       id: download
@@ -513,4 +515,8 @@ jobs:
       if: failure()
       run: |
         echo "❌ Workflow failed. Check logs above for details."
-        echo "Common issues:
+        echo "Common issues:"
+        echo "   • Invalid Instagram URL"
+        echo "   • Missing API keys"
+        echo "   • Network connectivity"
+        echo "   • Video processing errors"
