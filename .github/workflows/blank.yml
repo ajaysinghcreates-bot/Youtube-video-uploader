@@ -1,4 +1,4 @@
-name: Instagram Reels to YouTube Shorts (Fixed & Enhanced)
+name: Instagram Reels to YouTube Shorts (Vosk Version)
 
 on:
   workflow_dispatch:
@@ -25,165 +25,185 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y ffmpeg
-        python -m pip install --upgrade pip
-        pip install yt-dlp openai google-api-python-client google-auth google-auth-oauthlib google-auth-httplib2 whisper ffmpeg-python
+        sudo apt-get install -y ffmpeg unzip
+        python3 -m pip install --upgrade pip
+        pip install yt-dlp openai google-api-python-client google-auth google-auth-oauthlib google-auth-httplib2 ffmpeg-python vosk
 
     - name: Download Instagram Reel
       id: download
       run: |
-        python - <<EOF
-import yt_dlp, os, json
+        cat <<EOF | python3
+        import yt_dlp, os
 
-url="${{ github.event.inputs.instagram_url }}"
-os.makedirs("downloads", exist_ok=True)
+        url = '${{ github.event.inputs.instagram_url }}'
+        os.makedirs('downloads', exist_ok=True)
 
-ydl_opts = {
-    "format": "best[height<=1920]/best",
-    "outtmpl": "downloads/%(id)s.%(ext)s",
-    "writeinfojson": True,
-    "http_headers": {"User-Agent": "Mozilla/5.0"}
-}
+        ydl_opts = {
+          'format': 'best[height<=1920]/best',
+          'outtmpl': 'downloads/%(id)s.%(ext)s',
+          'writeinfojson': True,
+          'http_headers': {'User-Agent': 'Mozilla/5.0'}
+        }
 
-with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-    info = ydl.extract_info(url, download=True)
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+          info = ydl.extract_info(url, download=True)
 
-video_file = None
-for ext in [".mp4", ".mkv", ".webm"]:
-    for f in os.listdir("downloads"):
-        if f.endswith(ext):
-            video_file = f
+        video_file = None
+        for ext in ['.mp4', '.mkv', '.webm']:
+          for f in os.listdir('downloads'):
+            if f.endswith(ext):
+              video_file = f
+              break
+          if video_file:
             break
-    if video_file:
-        break
 
-if not video_file:
-    raise Exception("Video download failed.")
+        if not video_file:
+          raise Exception('Video download failed.')
 
-video_path = f"downloads/{video_file}"
-print(f"video_file={video_path}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
-print("success=true", file=open(os.environ["GITHUB_OUTPUT"], "a"))
-EOF
+        video_path = f'downloads/{video_file}'
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+          fh.write(f'video_file={video_path}\n')
+          fh.write('success=true\n')
+        EOF
 
     - name: Extract audio
       if: steps.download.outputs.success == 'true'
       run: |
         ffmpeg -y -i "${{ steps.download.outputs.video_file }}" -vn -acodec pcm_s16le -ar 16000 -ac 1 downloads/audio.wav
 
-    - name: Transcribe audio
+    - name: Transcribe audio with Vosk
       if: steps.download.outputs.success == 'true'
       run: |
-        python - <<EOF
-import whisper, json
+        curl -L -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+        unzip -q model.zip -d .
+        mv vosk-model-small-en-us-0.15 model
 
-model = whisper.load_model("base")
-result = model.transcribe("downloads/audio.wav")
+        cat <<EOF | python3
+        import wave
+        import json
+        from vosk import Model, KaldiRecognizer
 
-with open("downloads/transcript.json", "w", encoding="utf-8") as f:
-    json.dump(result, f, ensure_ascii=False, indent=2)
-EOF
+        wf = wave.open("downloads/audio.wav", "rb")
+        if wf.getnchannels() != 1 or wf.getsampwidth() != 2 or wf.getframerate() not in [8000, 16000, 44100]:
+            raise ValueError("Audio file must be WAV mono PCM with a supported sample rate.")
+
+        model = Model("model")
+        rec = KaldiRecognizer(model, wf.getframerate())
+        rec.SetWords(True)
+
+        result_text = ""
+        while True:
+            data = wf.readframes(4000)
+            if len(data) == 0:
+                break
+            if rec.AcceptWaveform(data):
+                res = json.loads(rec.Result())
+                result_text += res.get("text", "") + " "
+
+        final_result = {"text": result_text.strip()}
+        with open("downloads/transcript.json", "w", encoding="utf-8") as f:
+            json.dump(final_result, f, ensure_ascii=False, indent=2)
+        EOF
 
     - name: Generate YouTube metadata
       if: steps.download.outputs.success == 'true'
       run: |
-        python - <<EOF
-import os, openai, json, re
+        cat <<EOF | python3
+        import os, openai, json, re
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+        openai.api_key = os.getenv('OPENAI_API_KEY')
 
-with open("downloads/transcript.json", "r") as f:
-    transcript = json.load(f)
+        with open('downloads/transcript.json', 'r') as f:
+            transcript = json.load(f)
 
-text = transcript.get("text", "")
+        text = transcript.get('text', '')
 
-prompt = f"""
-Create a catchy YouTube Shorts title (with emojis & #shorts), description (200-300 words), and 10-15 tags.
-Mix Hindi & English. Use the transcript for context.
-Return JSON only:
-{{"title":"...","description":"...","tags":["tag1"]}}
-Transcript: {text}
-"""
+        prompt = f'''
+        Create a catchy YouTube Shorts title (with emojis & #shorts), description (200-300 words), and 10-15 tags.
+        Mix Hindi & English. Use the transcript for context.
+        Return JSON only:
+        {{"title":"...","description":"...","tags":["tag1"]}}
+        Transcript: {text}
+        '''
 
-response = openai.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{"role": "user", "content": prompt}],
-    temperature=0.7,
-    max_tokens=1200
-)
+        response = openai.chat.completions.create(
+            model='gpt-4o-mini',
+            messages=[{'role': 'user', 'content': prompt}],
+            temperature=0.7,
+            max_tokens=1200
+        )
 
-content = response.choices[0].message.content
-match = re.search(r"\{.*\}", content, re.DOTALL)
+        content = response.choices[0].message.content
+        match = re.search(r'\{.*\}', content, re.DOTALL)
 
-seo = {"title": "🔥 Shorts Video #shorts", "description": "Watch now!", "tags": ["shorts"]}
+        seo = {'title': '🔥 Shorts Video #shorts', 'description': 'Watch now!', 'tags': ['shorts']}
+        if match:
+            try:
+                seo = json.loads(match.group())
+            except:
+                pass
 
-if match:
-    try:
-        seo = json.loads(match.group())
-    except Exception as e:
-        print("⚠️ Failed to parse SEO JSON. Using default.")
-
-with open("downloads/seo_content.json", "w") as f:
-    json.dump(seo, f, indent=2)
-EOF
+        with open('downloads/seo_content.json', 'w') as f:
+            json.dump(seo, f, indent=2)
+        EOF
 
     - name: Upload to YouTube
       if: steps.download.outputs.success == 'true'
       run: |
-        python - <<EOF
-import os, json
-from glob import glob
-from mimetypes import guess_type
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+        cat <<EOF | python3
+        import os, json
+        from glob import glob
+        from mimetypes import guess_type
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
 
-with open("downloads/seo_content.json", "r") as f:
-    seo = json.load(f)
+        with open('downloads/seo_content.json', 'r') as f:
+            seo = json.load(f)
 
-video_files = [f for f in glob("downloads/*") if f.endswith((".mp4", ".mkv", ".webm"))]
-if not video_files:
-    raise Exception("No video file found.")
-video_file = video_files[0]
+        video_files = [f for f in glob('downloads/*') if f.endswith(('.mp4', '.mkv', '.webm'))]
+        if not video_files:
+            raise Exception('No video file found.')
+        video_file = video_files[0]
 
-mime_type = guess_type(video_file)[0] or "video/mp4"
+        mime_type = guess_type(video_file)[0] or 'video/mp4'
 
-creds = Credentials(
-    token=None,
-    refresh_token=os.environ["YOUTUBE_REFRESH_TOKEN"],
-    client_id=os.environ["YOUTUBE_CLIENT_ID"],
-    client_secret=os.environ["YOUTUBE_CLIENT_SECRET"],
-    token_uri="https://oauth2.googleapis.com/token"
-)
+        creds = Credentials(
+            token=None,
+            refresh_token=os.environ['YOUTUBE_REFRESH_TOKEN'],
+            client_id=os.environ['YOUTUBE_CLIENT_ID'],
+            client_secret=os.environ['YOUTUBE_CLIENT_SECRET'],
+            token_uri='https://oauth2.googleapis.com/token'
+        )
 
-youtube = build("youtube", "v3", credentials=creds)
+        youtube = build('youtube', 'v3', credentials=creds)
 
-request = youtube.videos().insert(
-    part="snippet,status",
-    body={
-        "snippet": {
-            "title": seo.get("title", "🔥 Shorts Video #shorts"),
-            "description": seo.get("description", "Watch now!"),
-            "tags": seo.get("tags", ["shorts"]),
-            "categoryId": "24"
-        },
-        "status": {
-            "privacyStatus": "public",
-            "selfDeclaredMadeForKids": False
-        }
-    },
-    media_body=MediaFileUpload(video_file, mimetype=mime_type)
-)
+        request = youtube.videos().insert(
+            part='snippet,status',
+            body={
+                'snippet': {
+                    'title': seo.get('title', '🔥 Shorts Video #shorts'),
+                    'description': seo.get('description', 'Watch now!'),
+                    'tags': seo.get('tags', ['shorts']),
+                    'categoryId': '24'
+                },
+                'status': {
+                    'privacyStatus': 'public',
+                    'selfDeclaredMadeForKids': False
+                }
+            },
+            media_body=MediaFileUpload(video_file, mimetype=mime_type)
+        )
 
-response = request.execute()
-link = f"https://www.youtube.com/watch?v={response['id']}"
+        response = request.execute()
+        link = f'https://www.youtube.com/watch?v={response["id"]}'
+        print('✅ Uploaded Video Link:', link)
 
-print("✅ Uploaded Video Link:", link)
-
-with open("downloads/video_link.txt", "w") as f:
-    f.write(link)
-EOF
+        with open('downloads/video_link.txt', 'w') as f:
+            f.write(link)
+        EOF
 
     - name: Cleanup
       if: always()
-      run: rm -rf downloads/
+      run: rm -rf downloads/ model/ model.zip
       
