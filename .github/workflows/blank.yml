@@ -1,11 +1,14 @@
-name: Instagram Reels to YouTube Shorts (Auto Upload)
+name: Instagram Reels to YouTube Shorts (SEO Hinglish)
 
 on:
+  schedule:
+    # Run daily at 9 AM UTC
+    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       instagram_url:
-        description: 'Instagram Reel URL'
-        required: true
+        description: 'Instagram Reel URL (optional - for manual trigger)'
+        required: false
         type: string
 
 env:
@@ -15,41 +18,51 @@ env:
   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
 jobs:
-  process:
+  upload:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-          pip install --upgrade pip
-          pip install --upgrade yt-dlp google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client requests ffmpeg-python
-          pip install --force-reinstall "openai==1.51.0" "httpx==0.27.2"
-          pip install --upgrade git+https://github.com/openai/whisper.git
+          pip install yt-dlp openai google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
 
       - name: Download Instagram Reel
         run: |
           mkdir -p downloads
-          yt-dlp -f mp4 -o "downloads/video.mp4" "${{ github.event.inputs.instagram_url }}"
+          if [ -n "${{ github.event.inputs.instagram_url }}" ]; then
+            yt-dlp -o "downloads/video.mp4" "${{ github.event.inputs.instagram_url }}"
+          else
+            echo "❌ No Instagram URL provided"
+            exit 1
+          fi
 
-      - name: Extract audio
-        run: ffmpeg -i downloads/video.mp4 -vn -acodec mp3 downloads/audio.mp3
-
-      - name: Transcribe audio
+      - name: Extract transcript using OpenAI
         run: |
           python - <<EOF
-          import whisper, json
-          model = whisper.load_model("base")
-          result = model.transcribe("downloads/audio.mp3")
+          import openai, json
+
+          client = openai.OpenAI(api_key="${{ secrets.OPENAI_API_KEY }}")
+
+          audio_file = open("downloads/video.mp4", "rb")
+          transcript = client.audio.transcriptions.create(
+              model="gpt-4o-transcribe",
+              file=audio_file
+          )
+
           with open("downloads/transcript.json", "w", encoding="utf-8") as f:
-              json.dump(result, f, ensure_ascii=False, indent=2)
+              json.dump(transcript, f, indent=2)
+
           print("✅ Transcript saved")
           EOF
 
-      - name: Generate SEO metadata
+      - name: Generate SEO metadata (Hinglish Shorts style)
         run: |
           python - <<EOF
           import json, openai, re
@@ -60,17 +73,31 @@ jobs:
           text = transcript.get("text", "")
 
           prompt = f"""
-          You are a YouTube SEO expert. Based ONLY on this transcript, generate metadata for a YouTube Short.
+          You are a YouTube Shorts SEO expert.  
+          Based ONLY on this transcript, generate metadata for a viral YouTube Shorts video.  
 
           Transcript:
           {text}
 
           Rules:
-          - Title: Catchy, 5-10 words, directly related to transcript
-          - Description: 200-300 words, summarize transcript naturally, add 10-15 relevant hashtags
-          - Tags: 15-25 related keywords, no duplicates, short phrases
+          - Title:
+            * Must be Hinglish (mix Hindi + English naturally).
+            * Use emojis 🎬🔥🤣😍 wherever relevant.
+            * End with "#shorts".
+            * Max 10-12 words.
+          - Description:
+            * 300-500 words.
+            * Written in Hinglish (Hindi + English).
+            * Summarize transcript content + add fun/context.
+            * Must include at least 15 trending hashtags (#funny #shorts #viral etc).
+            * End with a CTA like: "👉 Like, Share & Subscribe for more! 🔔".
+          - Tags:
+            * 20-30 keywords, Hinglish style.
+            * Short phrases only.
+            * Directly related to transcript content, no random terms.
+            * Include "shorts", "viral shorts", "trending shorts".
 
-          Respond in pure JSON only:
+          Respond in valid JSON only:
           {{
             "title": "...",
             "description": "...",
@@ -78,11 +105,13 @@ jobs:
           }}
           """
 
-          response = openai.chat.completions.create(
+          client = openai.OpenAI(api_key="${{ secrets.OPENAI_API_KEY }}")
+
+          response = client.chat.completions.create(
               model="gpt-4o-mini",
               messages=[{"role": "user", "content": prompt}],
-              max_tokens=800,
-              temperature=0.7
+              max_tokens=1000,
+              temperature=0.8
           )
 
           content = response.choices[0].message.content
@@ -93,35 +122,35 @@ jobs:
               try:
                   seo_json = json.loads(match.group())
               except:
-                  seo_json = {"title":"Untitled Short","description":"No description","tags":["shorts"]}
+                  seo_json = {"title":"Viral Video #shorts🔥","description":"No description","tags":["shorts","viral"]}
           else:
-              seo_json = {"title":"Untitled Short","description":"No description","tags":["shorts"]}
+              seo_json = {"title":"Viral Video #shorts🔥","description":"No description","tags":["shorts","viral"]}
 
           with open("downloads/seo_content.json", "w", encoding="utf-8") as f:
               json.dump(seo_json, f, indent=2)
 
-          print("✅ SEO metadata ready")
+          print("✅ Hinglish SEO metadata ready")
           EOF
 
-      - name: Upload to YouTube
+      - name: Upload video to YouTube Shorts
         run: |
           python - <<EOF
-          import os, json, google.auth.transport.requests
+          import json
           from google.oauth2.credentials import Credentials
           from googleapiclient.discovery import build
 
+          with open("downloads/seo_content.json", "r", encoding="utf-8") as f:
+              seo = json.load(f)
+
           creds = Credentials(
               None,
-              refresh_token=os.environ["YOUTUBE_REFRESH_TOKEN"],
-              client_id=os.environ["YOUTUBE_CLIENT_ID"],
-              client_secret=os.environ["YOUTUBE_CLIENT_SECRET"],
+              refresh_token="${{ secrets.YOUTUBE_REFRESH_TOKEN }}",
+              client_id="${{ secrets.YOUTUBE_CLIENT_ID }}",
+              client_secret="${{ secrets.YOUTUBE_CLIENT_SECRET }}",
               token_uri="https://oauth2.googleapis.com/token"
           )
 
           youtube = build("youtube", "v3", credentials=creds)
-
-          with open("downloads/seo_content.json", "r", encoding="utf-8") as f:
-              seo = json.load(f)
 
           request = youtube.videos().insert(
               part="snippet,status",
@@ -139,6 +168,7 @@ jobs:
               },
               media_body="downloads/video.mp4"
           )
+
           response = request.execute()
           print("✅ Uploaded to YouTube:", response["id"])
           EOF
