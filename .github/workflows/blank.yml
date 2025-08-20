@@ -1,4 +1,4 @@
-name: Instagram Reels to YouTube Shorts (Advanced SEO - Fixed)
+name: Instagram Reels to YouTube Shorts (SEO Auto)
 
 on:
   schedule:
@@ -18,11 +18,10 @@ env:
   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
 jobs:
-  process-and-upload:
+  process:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install dependencies
@@ -31,38 +30,39 @@ jobs:
           sudo apt-get install -y ffmpeg
           pip install --upgrade pip
           pip install --upgrade yt-dlp google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client requests beautifulsoup4 ffmpeg-python
-          # ✅ Correct Whisper installation (fixes AttributeError)
-          pip install --upgrade openai==1.51.0 git+https://github.com/openai/whisper.git
+          # ✅ Reinstall OpenAI and HTTPX to fix proxies bug
+          pip install --force-reinstall "openai==1.51.0" "httpx==0.27.2"
+          pip install --upgrade git+https://github.com/openai/whisper.git
 
       - name: Download Instagram Reel
         run: |
-          URL="${{ github.event.inputs.instagram_url }}"
-          if [ -z "$URL" ]; then
-            echo "⚠️ No Instagram URL provided. Exiting..."
+          mkdir -p downloads
+          if [ -n "${{ github.event.inputs.instagram_url }}" ]; then
+            yt-dlp -f mp4 -o "downloads/video.mp4" "${{ github.event.inputs.instagram_url }}"
+          else
+            echo "No URL provided, exiting."
             exit 1
           fi
-          mkdir -p downloads
-          yt-dlp -f mp4 -o "downloads/video.mp4" "$URL"
 
       - name: Extract Audio
         run: |
           ffmpeg -i downloads/video.mp4 -vn -acodec mp3 downloads/audio.mp3
 
-      - name: Transcribe Audio with Whisper
+      - name: Transcribe Audio
         run: |
           python - <<EOF
           import whisper, json
-          model = whisper.load_model("small")
+          model = whisper.load_model("base")
           result = model.transcribe("downloads/audio.mp3")
           with open("downloads/transcript.json", "w", encoding="utf-8") as f:
-              json.dump(result, f, indent=2, ensure_ascii=False)
-          print("✅ Transcript saved to downloads/transcript.json")
+              json.dump(result, f, ensure_ascii=False, indent=2)
+          print("✅ Transcript saved")
           EOF
 
-      - name: Generate SEO metadata
+      - name: Generate SEO Metadata
         run: |
           python - <<EOF
-          import json, os, re, openai
+          import json, re, openai, os
 
           with open("downloads/transcript.json", "r", encoding="utf-8") as f:
               transcript = json.load(f)
@@ -108,9 +108,5 @@ jobs:
           print("✅ SEO content generated from transcript")
           EOF
 
-      - name: Upload Video to YouTube
-        run: |
-          python upload_to_youtube.py
-
-      - name: Cleanup
-        run: rm -f *.py
+      - name: Show generated SEO content
+        run: cat downloads/seo_content.json
