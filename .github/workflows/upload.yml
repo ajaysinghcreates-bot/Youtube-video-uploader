@@ -1,15 +1,11 @@
-name: Video to YouTube Shorts (with Custom Metadata)
+name: Reels/Video to YouTube Shorts (with Custom Metadata)
 
 on:
   workflow_dispatch:
     inputs:
-      instagram_url:
-        description: 'Instagram Reel URL (optional)'
-        required: false
-        type: string
       video_url:
-        description: 'Direct video URL (mp4, etc. optional)'
-        required: false
+        description: 'Video link (Instagram, Jumpshare, Google Drive, Dropbox, direct mp4, etc.)'
+        required: true
         type: string
       custom_title:
         description: 'Custom YouTube title (optional)'
@@ -44,17 +40,10 @@ jobs:
         run: |
           pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client openai yt-dlp
 
-      - name: Download Reel (if instagram_url provided)
-        if: ${{ github.event.inputs.instagram_url != '' }}
+      - name: Download video
         run: |
           mkdir -p downloads
-          yt-dlp -o "downloads/video.mp4" "${{ github.event.inputs.instagram_url }}"
-
-      - name: Download video (if video_url provided)
-        if: ${{ github.event.inputs.video_url != '' }}
-        run: |
-          mkdir -p downloads
-          curl -L "${{ github.event.inputs.video_url }}" -o "downloads/video.mp4"
+          yt-dlp -o "downloads/video.mp4" "${{ github.event.inputs.video_url }}"
 
       - name: Ensure video exists
         run: |
