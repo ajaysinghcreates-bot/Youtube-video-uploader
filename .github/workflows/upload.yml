@@ -1,0 +1,171 @@
+name: Instagram Reels / Video to YouTube Shorts (with Custom Metadata)
+
+on:
+  workflow_dispatch:
+    inputs:
+      instagram_url:
+        description: 'Instagram Reel URL (optional)'
+        required: false
+        type: string
+      video_url:
+        description: 'Direct video URL (mp4, etc. optional)'
+        required: false
+        type: string
+      custom_title:
+        description: 'Custom YouTube title (optional)'
+        required: false
+        type: string
+      custom_description:
+        description: 'Custom YouTube description (optional)'
+        required: false
+        type: string
+      custom_tags:
+        description: 'Custom YouTube tags (comma separated, optional)'
+        required: false
+        type: string
+
+  schedule:
+    - cron: '0 9 * * *'   # Run daily at 9 AM UTC
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client openai yt-dlp
+
+      - name: Download Reel (if instagram_url provided)
+        if: ${{ github.event.inputs.instagram_url != '' }}
+        run: |
+          mkdir -p downloads
+          yt-dlp -o "downloads/video.mp4" "${{ github.event.inputs.instagram_url }}"
+
+      - name: Download video (if video_url provided)
+        if: ${{ github.event.inputs.video_url != '' }}
+        run: |
+          mkdir -p downloads
+          curl -L "${{ github.event.inputs.video_url }}" -o "downloads/video.mp4"
+
+      - name: Ensure video exists
+        run: |
+          if [ ! -f downloads/video.mp4 ]; then
+            echo "⚠️ No video found in downloads/video.mp4"
+            exit 1
+          fi
+
+      - name: Upload to YouTube
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CUSTOM_TITLE: ${{ github.event.inputs.custom_title }}
+          CUSTOM_DESCRIPTION: ${{ github.event.inputs.custom_description }}
+          CUSTOM_TAGS: ${{ github.event.inputs.custom_tags }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+        run: |
+          cat << 'EOF' > upload.py
+          import os
+          import pickle
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+          from google_auth_oauthlib.flow import InstalledAppFlow
+          from google.auth.transport.requests import Request
+          from openai import OpenAI
+
+          SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+
+          def authenticate_youtube():
+              creds = None
+              if os.path.exists("token.pickle"):
+                  with open("token.pickle", "rb") as token:
+                      creds = pickle.load(token)
+              if not creds or not creds.valid:
+                  if creds and creds.expired and creds.refresh_token:
+                      creds.refresh(Request())
+                  else:
+                      with open("client_secrets.json", "w") as f:
+                          f.write(os.getenv("YOUTUBE_CLIENT_SECRET"))
+                      flow = InstalledAppFlow.from_client_secrets_file("client_secrets.json", SCOPES)
+                      creds = flow.run_console()
+                  with open("token.pickle", "wb") as token:
+                      pickle.dump(creds, token)
+              return build("youtube", "v3", credentials=creds)
+
+          def generate_metadata(video_path, custom_title=None, custom_description=None, custom_tags=None):
+              client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+              if custom_title and (custom_description or custom_tags):
+                  return {
+                      "title": custom_title,
+                      "description": custom_description if custom_description else "",
+                      "tags": custom_tags if custom_tags else []
+                  }
+
+              if custom_title and not (custom_description or custom_tags):
+                  return {
+                      "title": custom_title,
+                      "description": "",
+                      "tags": []
+                  }
+
+              # Auto-generate
+              prompt = f"""
+              Generate SEO metadata for a YouTube Shorts video:
+              - Hinglish/Hindi Title under 100 chars with #shorts
+              - Engaging Description under 5000 words
+              - 20 SEO Tags (comma separated)
+              """
+
+              response = client.chat.completions.create(
+                  model="gpt-4o-mini",
+                  messages=[{"role": "user", "content": prompt}]
+              )
+
+              text = response.choices[0].message.content
+              lines = text.splitlines()
+              title = next((l for l in lines if "Title:" in l), "My YouTube Shorts #shorts").replace("Title:", "").strip()
+              description = next((l for l in lines if "Description:" in l), "Amazing YouTube Shorts video! #shorts").replace("Description:", "").strip()
+              tags_line = next((l for l in lines if "Tags:" in l), "funny,shorts,viral,india")
+              tags = [t.strip() for t in tags_line.replace("Tags:", "").split(",")]
+
+              return {"title": title, "description": description, "tags": tags}
+
+          def upload_video(youtube, video_path, metadata):
+              request = youtube.videos().insert(
+                  part="snippet,status",
+                  body={
+                      "snippet": {
+                          "title": metadata["title"],
+                          "description": metadata["description"],
+                          "tags": metadata["tags"]
+                      },
+                      "status": {"privacyStatus": "public"}
+                  },
+                  media_body=MediaFileUpload(video_path)
+              )
+              response = request.execute()
+              print("✅ Uploaded:", f"https://www.youtube.com/watch?v={response['id']}")
+
+          if __name__ == "__main__":
+              youtube = authenticate_youtube()
+              video_path = "downloads/video.mp4"
+
+              custom_title = os.getenv("CUSTOM_TITLE", None)
+              custom_description = os.getenv("CUSTOM_DESCRIPTION", None)
+              custom_tags = os.getenv("CUSTOM_TAGS", None)
+              if custom_tags:
+                  custom_tags = [t.strip() for t in custom_tags.split(",")]
+
+              metadata = generate_metadata(video_path, custom_title, custom_description, custom_tags)
+              upload_video(youtube, video_path, metadata)
+          EOF
+
+          python3 upload.py
