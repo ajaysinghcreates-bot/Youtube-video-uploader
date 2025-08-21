@@ -1,4 +1,4 @@
-name: Instagram Reels / Video to YouTube Shorts (with Custom Metadata)
+name: Video to YouTube Shorts (with Custom Metadata)
 
 on:
   workflow_dispatch:
